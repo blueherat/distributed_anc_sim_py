@@ -1,0 +1,88 @@
+{
+  "rows": [
+    {
+      "algorithm": "CFxLMS",
+      "runtime_py_s": 15.823343799998838,
+      "runtime_mat_s": 19.3055243,
+      "speedup_mat_over_py": 1.2200660330720625,
+      "curve_rmse_db": 0.03995070533194986,
+      "curve_mean_abs_db": 0.02913798007902745,
+      "mean_nr_py_last_1s_db": 7.103213165617601,
+      "mean_nr_mat_last_1s_db": 7.1032131656175626,
+      "abs_mean_nr_last_1s_delta_db": 3.8191672047105385e-14
+    },
+    {
+      "algorithm": "ADFxLMS",
+      "runtime_py_s": 13.373445999997784,
+      "runtime_mat_s": 35.8825769,
+      "speedup_mat_over_py": 2.6831212314317447,
+      "curve_rmse_db": 0.014493016704825527,
+      "curve_mean_abs_db": 0.009770992718928926,
+      "mean_nr_py_last_1s_db": 5.2952460590988375,
+      "mean_nr_mat_last_1s_db": 5.295246059098838,
+      "abs_mean_nr_last_1s_delta_db": 8.881784197001252e-16
+    },
+    {
+      "algorithm": "ADFxLMS-BC",
+      "runtime_py_s": 7.152812199998152,
+      "runtime_mat_s": 21.7506394,
+      "speedup_mat_over_py": 3.0408514569983565,
+      "curve_rmse_db": 0.015991602128552097,
+      "curve_mean_abs_db": 0.010825729270328011,
+      "mean_nr_py_last_1s_db": 5.233301859522779,
+      "mean_nr_mat_last_1s_db": 5.233301859522777,
+      "abs_mean_nr_last_1s_delta_db": 1.7763568394002505e-15
+    },
+    {
+      "algorithm": "Diff-FxLMS",
+      "runtime_py_s": 4.237378199999512,
+      "runtime_mat_s": 10.5856472,
+      "speedup_mat_over_py": 2.498159640317501,
+      "curve_rmse_db": 0.014304914802347753,
+      "curve_mean_abs_db": 0.010335523838962326,
+      "mean_nr_py_last_1s_db": 0.6113691564528672,
+      "mean_nr_mat_last_1s_db": 0.6113691564528668,
+      "abs_mean_nr_last_1s_delta_db": 3.3306690738754696e-16
+    },
+    {
+      "algorithm": "DCFxLMS",
+      "runtime_py_s": 2.7970423999977356,
+      "runtime_mat_s": 8.6402831,
+      "speedup_mat_over_py": 3.089078342182798,
+      "curve_rmse_db": 0.02723666337500244,
+      "curve_mean_abs_db": 0.019055938050317668,
+      "mean_nr_py_last_1s_db": 8.46645922281574,
+      "mean_nr_mat_last_1s_db": 8.466459222815736,
+      "abs_mean_nr_last_1s_delta_db": 3.552713678800501e-15
+    },
+    {
+      "algorithm": "CDFxLMS",
+      "runtime_py_s": 6.343498999998701,
+      "runtime_mat_s": 17.8003984,
+      "speedup_mat_over_py": 2.806085158995634,
+      "curve_rmse_db": 0.02795576111703586,
+      "curve_mean_abs_db": 0.02021877510947096,
+      "mean_nr_py_last_1s_db": 10.107954190520939,
+      "mean_nr_mat_last_1s_db": 10.107954190520937,
+      "abs_mean_nr_last_1s_delta_db": 1.7763568394002505e-15
+    },
+    {
+      "algorithm": "MGDFxLMS",
+      "runtime_py_s": 15.183920399998897,
+      "runtime_mat_s": 16.5843704,
+      "speedup_mat_over_py": 1.0922324382049056,
+      "curve_rmse_db": 0.027544936295500155,
+      "curve_mean_abs_db": 0.01963037653385253,
+      "mean_nr_py_last_1s_db": 6.822176044562138,
+      "mean_nr_mat_last_1s_db": 6.822176044562137,
+      "abs_mean_nr_last_1s_delta_db": 8.881784197001252e-16
+    }
+  ],
+  "curve_points": 40000,
+  "overlay_png": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\python_scripts\\strict_convergence_overlay.png",
+  "delta_png": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\python_scripts\\strict_convergence_delta.png",
+  "py_summary": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\python_scripts\\strict_py_summary.json",
+  "mat_summary": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\python_scripts\\strict_mat_summary.json",
+  "py_curves": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\python_scripts\\strict_py_curves.npz",
+  "mat_curves": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\python_scripts\\strict_mat_curves.mat"
+}

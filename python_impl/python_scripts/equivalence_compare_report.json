@@ -1,0 +1,94 @@
+{
+  "rows": [
+    {
+      "algorithm": "CFxLMS",
+      "runtime_py_s": 2.9509180999993987,
+      "runtime_mat_s": 3.655015,
+      "speedup_mat_over_py": 1.2386026572546167,
+      "mean_nr_py_db": -6.373167163235654,
+      "mean_nr_mat_db": -42.37161920650795,
+      "abs_mean_nr_delta_db": 35.998452043272295,
+      "mean_nse_py_db": 6.373167163235654,
+      "mean_nse_mat_db": 42.37161920650795,
+      "abs_mean_nse_delta_db": 35.998452043272295
+    },
+    {
+      "algorithm": "ADFxLMS",
+      "runtime_py_s": 2.5978617000000668,
+      "runtime_mat_s": 7.0844914,
+      "speedup_mat_over_py": 2.7270471711407187,
+      "mean_nr_py_db": 1.0591009359709462,
+      "mean_nr_mat_db": 1.3083666336108424,
+      "abs_mean_nr_delta_db": 0.24926569763989614,
+      "mean_nse_py_db": -1.0591009359709462,
+      "mean_nse_mat_db": -1.3083666336108424,
+      "abs_mean_nse_delta_db": 0.24926569763989614
+    },
+    {
+      "algorithm": "ADFxLMS-BC",
+      "runtime_py_s": 1.34817049999765,
+      "runtime_mat_s": 4.0051937,
+      "speedup_mat_over_py": 2.9708361813338757,
+      "mean_nr_py_db": 1.0464030042282146,
+      "mean_nr_mat_db": 1.3287567332274466,
+      "abs_mean_nr_delta_db": 0.28235372899923195,
+      "mean_nse_py_db": -1.0464030042282146,
+      "mean_nse_mat_db": -1.3287567332274466,
+      "abs_mean_nse_delta_db": 0.28235372899923195
+    },
+    {
+      "algorithm": "Diff-FxLMS",
+      "runtime_py_s": 0.8137902000016766,
+      "runtime_mat_s": 2.181043,
+      "speedup_mat_over_py": 2.6801047739276123,
+      "mean_nr_py_db": 0.3130179494597883,
+      "mean_nr_mat_db": 0.3881301788007764,
+      "abs_mean_nr_delta_db": 0.0751122293409881,
+      "mean_nse_py_db": -0.3130179494597883,
+      "mean_nse_mat_db": -0.3881301788007764,
+      "abs_mean_nse_delta_db": 0.0751122293409881
+    },
+    {
+      "algorithm": "DCFxLMS",
+      "runtime_py_s": 0.5425417000005837,
+      "runtime_mat_s": 1.7351887,
+      "speedup_mat_over_py": 3.1982586776244726,
+      "mean_nr_py_db": 2.8037707955756055,
+      "mean_nr_mat_db": 3.088018786223487,
+      "abs_mean_nr_delta_db": 0.28424799064788164,
+      "mean_nse_py_db": -2.8037707955756055,
+      "mean_nse_mat_db": -3.088018786223487,
+      "abs_mean_nse_delta_db": 0.28424799064788164
+    },
+    {
+      "algorithm": "CDFxLMS",
+      "runtime_py_s": 1.2108178000016778,
+      "runtime_mat_s": 4.3935103,
+      "speedup_mat_over_py": 3.628547829404153,
+      "mean_nr_py_db": 4.9366868717364945,
+      "mean_nr_mat_db": 5.0547951820989905,
+      "abs_mean_nr_delta_db": 0.11810831036249603,
+      "mean_nse_py_db": -4.9366868717364945,
+      "mean_nse_mat_db": -5.0547951820989905,
+      "abs_mean_nse_delta_db": 0.11810831036249603
+    },
+    {
+      "algorithm": "MGDFxLMS",
+      "runtime_py_s": 3.036054599997442,
+      "runtime_mat_s": 3.5488943,
+      "speedup_mat_over_py": 1.1689164944540162,
+      "mean_nr_py_db": 2.5646343493388084,
+      "mean_nr_mat_db": 2.9202485158749716,
+      "abs_mean_nr_delta_db": 0.3556141665361632,
+      "mean_nse_py_db": -2.5646343493388084,
+      "mean_nse_mat_db": -2.9202485158749716,
+      "abs_mean_nse_delta_db": 0.3556141665361632
+    }
+  ],
+  "verdict": {
+    "all_algorithms_executed": true,
+    "note": "Both MATLAB and Python implementations execute all migrated algorithms. Absolute NSE values can differ because MATLAB and pyroomacoustics produce different RIR details."
+  },
+  "py_summary": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\python_scripts\\equivalence_py_summary.json",
+  "mat_summary": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\python_scripts\\equivalence_matlab_summary.json"
+}

@@ -1,0 +1,173 @@
+[
+  {
+    "room": {
+      "size": [
+        6.0,
+        5.5,
+        3.2
+      ],
+      "fs": 4000,
+      "sound_speed": 343.0,
+      "image_source_order": 2,
+      "material_absorption": 0.45,
+      "compensate_fractional_delay": true,
+      "fractional_delay_shift": null
+    },
+    "source_position": [
+      1.8441653292315703,
+      3.183730813716979,
+      1.707448921486531
+    ],
+    "primary_source_ids": [
+      101
+    ],
+    "node_layouts": [
+      {
+        "azimuth_deg": 31.247089812047903,
+        "ref_radius": 0.3972265911886146,
+        "sec_radius": 0.6569126899423813,
+        "err_radius": 0.8756396415748147,
+        "z_offset": 0.03187058673266878
+      },
+      {
+        "azimuth_deg": 111.4286174854787,
+        "ref_radius": 0.44303607919920746,
+        "sec_radius": 0.6560650681873026,
+        "err_radius": 0.8651344102123727,
+        "z_offset": 0.00459476423311056
+      },
+      {
+        "azimuth_deg": 232.94751142048668,
+        "ref_radius": 0.5189098057124057,
+        "sec_radius": 0.7554864313868357,
+        "err_radius": 0.9504151471254796,
+        "z_offset": -0.07967557635077258
+      },
+      {
+        "azimuth_deg": 344.48159336915114,
+        "ref_radius": 0.548507765193876,
+        "sec_radius": 0.7764153983655263,
+        "err_radius": 0.955193437851555,
+        "z_offset": 0.009991904034014898
+      }
+    ],
+    "reference_start_id": 401,
+    "secondary_start_id": 201,
+    "error_start_id": 301,
+    "boundary_margin": 0.15
+  },
+  {
+    "room": {
+      "size": [
+        6.0,
+        5.5,
+        3.2
+      ],
+      "fs": 4000,
+      "sound_speed": 343.0,
+      "image_source_order": 2,
+      "material_absorption": 0.45,
+      "compensate_fractional_delay": true,
+      "fractional_delay_shift": null
+    },
+    "source_position": [
+      1.228819657460762,
+      2.3962359077437627,
+      1.207276800291228
+    ],
+    "primary_source_ids": [
+      101
+    ],
+    "node_layouts": [
+      {
+        "azimuth_deg": 19.882488802714665,
+        "ref_radius": 0.50531617264055,
+        "sec_radius": 0.7394515240930171,
+        "err_radius": 0.8756241190612106,
+        "z_offset": -0.0783906768653244
+      },
+      {
+        "azimuth_deg": 123.79642214022644,
+        "ref_radius": 0.4455701183727965,
+        "sec_radius": 0.7301140169134609,
+        "err_radius": 0.8553211055606573,
+        "z_offset": 0.09306992413316047
+      },
+      {
+        "azimuth_deg": 244.83732056515177,
+        "ref_radius": 0.5363014140326374,
+        "sec_radius": 0.7948344721398549,
+        "err_radius": 0.9479021174764724,
+        "z_offset": 0.025685078966982064
+      },
+      {
+        "azimuth_deg": 328.67615528322773,
+        "ref_radius": 0.5290894159845343,
+        "sec_radius": 0.8154511268932935,
+        "err_radius": 0.9428641198847432,
+        "z_offset": -0.06166664470091427
+      }
+    ],
+    "reference_start_id": 401,
+    "secondary_start_id": 201,
+    "error_start_id": 301,
+    "boundary_margin": 0.15
+  },
+  {
+    "room": {
+      "size": [
+        6.0,
+        5.5,
+        3.2
+      ],
+      "fs": 4000,
+      "sound_speed": 343.0,
+      "image_source_order": 2,
+      "material_absorption": 0.45,
+      "compensate_fractional_delay": true,
+      "fractional_delay_shift": null
+    },
+    "source_position": [
+      2.592308334828238,
+      3.0369258442210323,
+      2.0585293550056756
+    ],
+    "primary_source_ids": [
+      101
+    ],
+    "node_layouts": [
+      {
+        "azimuth_deg": 47.15586878237467,
+        "ref_radius": 0.4696096075375664,
+        "sec_radius": 0.6781641833842176,
+        "err_radius": 0.8113830007507348,
+        "z_offset": -0.07745255655091794
+      },
+      {
+        "azimuth_deg": 145.8324206938442,
+        "ref_radius": 0.41791415529379927,
+        "sec_radius": 0.7026110555357936,
+        "err_radius": 0.9296146999299988,
+        "z_offset": 0.03542364821519765
+      },
+      {
+        "azimuth_deg": 227.709840899028,
+        "ref_radius": 0.3616813991812919,
+        "sec_radius": 0.5567181680967196,
+        "err_radius": 0.7082429288327945,
+        "z_offset": -0.03866990082638633
+      },
+      {
+        "azimuth_deg": 358.4407103321133,
+        "ref_radius": 0.5877414006442552,
+        "sec_radius": 0.7705348291906622,
+        "err_radius": 0.9333230885324241,
+        "z_offset": -0.034427550386897945
+      }
+    ],
+    "reference_start_id": 401,
+    "secondary_start_id": 201,
+    "error_start_id": 301,
+    "boundary_margin": 0.15
+  }
+]
