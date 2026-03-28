@@ -24,12 +24,14 @@ classdef RIRManager < handle
         MaterialScattering = []
 
         PrimarySpeakers   dictionary
+        ReferenceMicrophones dictionary
         SecondarySpeakers dictionary
         ErrorMicrophones  dictionary
     end
 
     properties (Access = private)
         PrimaryRIRs   dictionary
+        ReferenceRIRs dictionary
         SecondaryRIRs dictionary
     end
 
@@ -37,10 +39,12 @@ classdef RIRManager < handle
         function obj = RIRManager()
             % 初始化 dictionary
             obj.PrimarySpeakers   = configureDictionary("uint32", "cell");
+            obj.ReferenceMicrophones = configureDictionary("uint32", "cell");
             obj.SecondarySpeakers = configureDictionary("uint32", "cell");
             obj.ErrorMicrophones  = configureDictionary("uint32", "cell");
 
             obj.PrimaryRIRs       = configureDictionary("string", "cell");
+            obj.ReferenceRIRs     = configureDictionary("string", "cell");
             obj.SecondaryRIRs     = configureDictionary("string", "cell");
         end
 
@@ -62,6 +66,15 @@ classdef RIRManager < handle
             obj.SecondarySpeakers(id) = {position};
         end
 
+        function addReferenceMicrophone(obj, id, position)
+            arguments
+                obj
+                id (1,1) uint32
+                position (1,3) double
+            end
+            obj.ReferenceMicrophones(id) = {position};
+        end
+
         function addErrorMicrophone(obj, id, position)
             arguments
                 obj
@@ -78,8 +91,14 @@ classdef RIRManager < handle
                 error('No error microphones have been added.');
             end
 
+            if numEntries(obj.ReferenceMicrophones) == 0
+                warning('No reference microphones have been added. Reference signal synthesis will be unavailable.');
+            end
+
             micIds = keys(obj.ErrorMicrophones);
             micPositions = cell2mat(values(obj.ErrorMicrophones));
+            refIds = keys(obj.ReferenceMicrophones);
+            refPositions = cell2mat(values(obj.ReferenceMicrophones));
             % --- 1. 主通路 ---
             if numEntries(obj.PrimarySpeakers) > 0
                 for spkId = keys(obj.PrimarySpeakers)'
@@ -93,6 +112,18 @@ classdef RIRManager < handle
                     end
                     if verbose
                         disp("Primary paths for Speaker " + spkId + " computed. RIR length: " + size(ir,2));
+                    end
+
+                    if numel(refIds) > 0
+                        refIr = obj.computeRIR(spkPos, refPositions);
+                        for j = 1:numel(refIds)
+                            refId = refIds(j);
+                            refKey = "P" + string(spkId) + "->R" + string(refId);
+                            obj.ReferenceRIRs(refKey) = {refIr(j, :)};
+                        end
+                        if verbose
+                            disp("Reference paths for Speaker " + spkId + " computed. RIR length: " + size(refIr,2));
+                        end
                     end
                 end
             else
@@ -134,12 +165,24 @@ classdef RIRManager < handle
             h = cell2mat(obj.SecondaryRIRs(key));
         end
 
-        function d = calculateDesiredSignal(obj, referenceSignal, nSamples)
+        function h = getReferenceRIR(obj, spkId, refMicId)
+            key = "P" + string(spkId) + "->R" + string(refMicId);
+            if ~isKey(obj.ReferenceRIRs, key)
+                error('Reference RIR for path (%s) does not exist.', key);
+            end
+            h = cell2mat(obj.ReferenceRIRs(key));
+        end
+
+        function d = calculateDesiredSignal(obj, sourceSignal, nSamples)
             keyPriSpks = keys(obj.PrimarySpeakers);
             keyErrMics = keys(obj.ErrorMicrophones);
             numPriSpks = numEntries(obj.PrimarySpeakers);
             numErrMics = numEntries(obj.ErrorMicrophones);
-            x = referenceSignal;
+            x = sourceSignal;
+
+            if size(x, 2) ~= numPriSpks
+                error('sourceSignal columns (%d) must match number of primary speakers (%d).', size(x, 2), numPriSpks);
+            end
 
             d = zeros(nSamples, numErrMics); % 期望信号
             for m = 1:numErrMics
@@ -147,6 +190,31 @@ classdef RIRManager < handle
                     P = obj.getPrimaryRIR(keyPriSpks(j), keyErrMics(m));
                     d_jm = conv(x(:, j), P);
                     d(:, m) = d(:, m) + d_jm(1:nSamples);
+                end
+            end
+        end
+
+        function xRef = calculateReferenceSignal(obj, sourceSignal, nSamples)
+            keyPriSpks = keys(obj.PrimarySpeakers);
+            keyRefMics = keys(obj.ReferenceMicrophones);
+
+            numPriSpks = numEntries(obj.PrimarySpeakers);
+            numRefMics = numEntries(obj.ReferenceMicrophones);
+
+            if numRefMics == 0
+                error('No reference microphones have been added.');
+            end
+
+            if size(sourceSignal, 2) ~= numPriSpks
+                error('sourceSignal columns (%d) must match number of primary speakers (%d).', size(sourceSignal, 2), numPriSpks);
+            end
+
+            xRef = zeros(nSamples, numRefMics);
+            for r = 1:numRefMics
+                for j = 1:numPriSpks
+                    Pr = obj.getReferenceRIR(keyPriSpks(j), keyRefMics(r));
+                    x_jr = conv(sourceSignal(:, j), Pr);
+                    xRef(:, r) = xRef(:, r) + x_jr(1:nSamples);
                 end
             end
         end
@@ -187,10 +255,13 @@ classdef RIRManager < handle
             % --- 3. 绘制次级声源 (绿色菱形) ---
             obj.plotDevices(ax, obj.SecondarySpeakers, 'g', 'd', 'Secondary Source');
 
-            % --- 4. 绘制误差麦克风 (蓝色圆圈) ---
+            % --- 4. 绘制参考麦克风 (品红色三角形) ---
+            obj.plotDevices(ax, obj.ReferenceMicrophones, 'm', '^', 'Reference Mic');
+
+            % --- 5. 绘制误差麦克风 (蓝色圆圈) ---
             obj.plotDevices(ax, obj.ErrorMicrophones, 'b', 'o', 'Error Mic');
 
-            % --- 5. 设置视图 ---
+            % --- 6. 设置视图 ---
             view(ax, 3); % 默认 3D 视图
             legend(ax, 'Location', 'bestoutside');
 
@@ -219,23 +290,23 @@ classdef RIRManager < handle
 
         function plotDevices(~, ax, deviceDict, color, marker, labelName)
             % 辅助函数：绘制特定类型的设备并配置数据游标 (Data Tip)
-            
+
             if numEntries(deviceDict) > 0
                 ids = keys(deviceDict);
                 % 提取位置矩阵 (N x 3)
-                positions = cell2mat(values(deviceDict)); 
-                
+                positions = cell2mat(values(deviceDict));
+
                 % 1. 绘制散点
                 s = scatter3(ax, positions(:,1), positions(:,2), positions(:,3), ...
                     60, color, 'filled', ...
                     'Marker', marker, ...
                     'DisplayName', labelName);
-                
+
                 % 2. 配置 Data Tip
                 s.DataTipTemplate.DataTipRows = [
                     s.DataTipTemplate.DataTipRows(1:3); % X, Y, Z
                     dataTipTextRow('ID', double(ids));  % ID
-                ];
+                    ];
             end
         end
     end

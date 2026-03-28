@@ -14,6 +14,14 @@ center = mgr.Room / 2;
 % 程序暂时不能兼容多个主扬声器
 mgr.addPrimarySpeaker(101, center + [1 0 0]);
 
+% 参考麦克风
+rRef = 0.9;
+refMicIds = uint32([401 402 403 404]);
+mgr.addReferenceMicrophone(refMicIds(1), center + [rRef 0 0]);
+mgr.addReferenceMicrophone(refMicIds(2), center - [rRef 0 0]);
+mgr.addReferenceMicrophone(refMicIds(3), center + [0 rRef 0]);
+mgr.addReferenceMicrophone(refMicIds(4), center - [0 rRef 0]);
+
 % 次扬声器
 r1 = 0.6;
 mgr.addSecondarySpeaker(201, center + [r1 0 0]);
@@ -35,8 +43,13 @@ duration = 10;                           % 秒
 f_low = 100;    % Hz
 f_high = 2000; % Hz
 [noise, time] = utils.wn_gen(mgr.Fs, duration, f_low, f_high);
-x = noise ./ max(abs(noise), [], 1); % 按列归一化
-d = mgr.calculateDesiredSignal(x, length(time)); % 期望信号
+sourceSignal = noise ./ max(abs(noise), [], 1); % 主噪声源信号
+d = mgr.calculateDesiredSignal(sourceSignal, length(time));
+x = mgr.calculateReferenceSignal(sourceSignal, length(time));
+
+refScale = max(abs(x), [], 1);
+refScale(refScale < eps) = 1;
+x = x ./ refScale; % 按列归一化参考信号
 
 %% CFxLMS 算法仿真
 % 仿真参数
@@ -56,22 +69,22 @@ fprintf('CFxLMS 仿真耗时 %f 秒。\n', t);
 % 节点
 mu_adf = 1e-4;
 node1 = algorithms.ADFxLMS.Node(1, mu_adf);
-node1.addRefMic(101);
+node1.addRefMic(refMicIds(1));
 node1.addSecSpk(201);
 node1.addErrMic(301);
 
 node2 = algorithms.ADFxLMS.Node(2, mu_adf);
-node2.addRefMic(101);
+node2.addRefMic(refMicIds(2));
 node2.addSecSpk(202);
 node2.addErrMic(302);
 
 node3 = algorithms.ADFxLMS.Node(3, mu_adf);
-node3.addRefMic(101);
+node3.addRefMic(refMicIds(3));
 node3.addSecSpk(203);
 node3.addErrMic(303);
 
 node4 = algorithms.ADFxLMS.Node(4, mu_adf);
-node4.addRefMic(101);
+node4.addRefMic(refMicIds(4));
 node4.addSecSpk(204);
 node4.addErrMic(304);
 
@@ -103,22 +116,22 @@ fprintf('ADFxLMS 仿真耗时 %f 秒。\n', t);
 % 节点
 mu_adf_bc = 1e-4;
 node1_bc = algorithms.ADFxLMS_BC.Node(1, mu_adf_bc);
-node1_bc.addRefMic(101);
+node1_bc.addRefMic(refMicIds(1));
 node1_bc.addSecSpk(201);
 node1_bc.addErrMic(301);
 
 node2_bc = algorithms.ADFxLMS_BC.Node(2, mu_adf_bc);
-node2_bc.addRefMic(101);
+node2_bc.addRefMic(refMicIds(2));
 node2_bc.addSecSpk(202);
 node2_bc.addErrMic(302);
 
 node3_bc = algorithms.ADFxLMS_BC.Node(3, mu_adf_bc);
-node3_bc.addRefMic(101);
+node3_bc.addRefMic(refMicIds(3));
 node3_bc.addSecSpk(203);
 node3_bc.addErrMic(303);
 
 node4_bc = algorithms.ADFxLMS_BC.Node(4, mu_adf_bc);
-node4_bc.addRefMic(101);
+node4_bc.addRefMic(refMicIds(4));
 node4_bc.addSecSpk(204);
 node4_bc.addErrMic(304);
 
@@ -150,22 +163,22 @@ fprintf('ADFxLMS-BC 仿真耗时 %f 秒。\n', t);
 % 节点
 mu_diff = 1e-4;
 node1_diff = algorithms.Diff_FxLMS.Node(1, mu_diff);
-node1_diff.addRefMic(101);
+node1_diff.addRefMic(refMicIds(1));
 node1_diff.addSecSpk(201);
 node1_diff.addErrMic(301);
 
 node2_diff = algorithms.Diff_FxLMS.Node(2, mu_diff);
-node2_diff.addRefMic(101);
+node2_diff.addRefMic(refMicIds(2));
 node2_diff.addSecSpk(202);
 node2_diff.addErrMic(302);
 
 node3_diff = algorithms.Diff_FxLMS.Node(3, mu_diff);
-node3_diff.addRefMic(101);
+node3_diff.addRefMic(refMicIds(3));
 node3_diff.addSecSpk(203);
 node3_diff.addErrMic(303);
 
 node4_diff = algorithms.Diff_FxLMS.Node(4, mu_diff);
-node4_diff.addRefMic(101);
+node4_diff.addRefMic(refMicIds(4));
 node4_diff.addSecSpk(204);
 node4_diff.addErrMic(304);
 
@@ -197,22 +210,22 @@ fprintf('Diff-FxLMS 仿真耗时 %f 秒。\n', t);
 % 节点
 mu_dcf = 1e-4;
 node1_dcf = algorithms.DCFxLMS.Node(1, mu_dcf);
-node1_dcf.addRefMic(101);
+node1_dcf.addRefMic(refMicIds(1));
 node1_dcf.addSecSpk(201);
 node1_dcf.addErrMic(301);
 
 node2_dcf = algorithms.DCFxLMS.Node(2, mu_dcf);
-node2_dcf.addRefMic(101);
+node2_dcf.addRefMic(refMicIds(2));
 node2_dcf.addSecSpk(202);
 node2_dcf.addErrMic(302);
 
 node3_dcf = algorithms.DCFxLMS.Node(3, mu_dcf);
-node3_dcf.addRefMic(101);
+node3_dcf.addRefMic(refMicIds(3));
 node3_dcf.addSecSpk(203);
 node3_dcf.addErrMic(303);
 
 node4_dcf = algorithms.DCFxLMS.Node(4, mu_dcf);
-node4_dcf.addRefMic(101);
+node4_dcf.addRefMic(refMicIds(4));
 node4_dcf.addSecSpk(204);
 node4_dcf.addErrMic(304);
 
@@ -289,23 +302,23 @@ for m = 1:num_mics
     % 创建子图 (自动计算行列，比如 4个节点就是 2x2)
     subplot(ceil(num_mics/2), 2, m);
     hold on; box on; grid on;
-    
+
     % 计算该麦克风处的期望信号功率 (分母)
     % 加上 eps 防止除以 0
     d_power = movmean(d(:, m).^2, window_size) + eps;
-    
+
     % 遍历每个算法
     for k = 1:length(all_results)
         % 获取该算法在该麦克风处的误差信号
         e_curr = all_results{k}.err_hist(:, m);
-        
+
         % 计算误差功率 (分子)
         e_power = movmean(e_curr.^2, window_size) + eps;
-        
+
         % 计算 NSE (Normalized Squared Error) in dB
         % 公式: 10 * log10( E[e^2] / E[d^2] )
         nse_curve = 10 * log10(e_power ./ d_power);
-        
+
         % 绘图
         plot(time, nse_curve, ...
             'LineStyle', line_styles{k}, ...
@@ -313,20 +326,20 @@ for m = 1:num_mics
             'LineWidth', 1.5, ...
             'DisplayName', alg_legends{k}); % 用于图例
     end
-    
+
     % 5. 设置子图格式
     % 标题格式: (a) Node 1, (b) Node 2 ...
     subplot_idx_char = char(96 + m); % 生成 a, b, c, d...
     title(sprintf('(%s) Node %d (Mic %d)', subplot_idx_char, m, mic_ids(m)), ...
-          'FontSize', 12, 'FontWeight', 'bold');
-      
+        'FontSize', 12, 'FontWeight', 'bold');
+
     xlabel('Time (Second)', 'FontSize', 10);
     ylabel('NSE (dB)', 'FontSize', 10);
-    
+
     % 坐标轴范围限制 (根据图片风格调整)
     xlim([0, duration]);
     ylim([-25, 5]); % 根据实际效果调整，通常降噪在 -20dB 到 -30dB 左右
-    
+
     % 仅在第一个子图中显示图例，避免遮挡
     if m == 1
         legend('Location', 'SouthWest', 'FontSize', 8);

@@ -3,14 +3,14 @@ clear; clc;
 %% 用户配置区域
 % 可选选项: "CFxLMS", "ADFxLMS", "ADFxLMS-BC", "Diff-FxLMS", "DCFxLMS", "CDFxLMS", "MGDFxLMS"
 % 例如：只想对比 CFxLMS 和 ADFxLMS，就写 ["CFxLMS", "ADFxLMS"]
-selected_algorithms = [ "CFxLMS", "DCFxLMS", "MGDFxLMS"];
+selected_algorithms = ["CFxLMS"];
 
 fprintf('当前选择运行的算法: %s\n', join(selected_algorithms, ', '));
 
 %% 声学仿真环境
 mgr = acoustics.RIRManager();
 % 房间参数
-mgr.Fs = 8000;
+mgr.Fs = 4000;
 mgr.Room = [5 5 5];
 mgr.Algorithm = "image-source";
 mgr.ImageSourceOrder = 2;
@@ -20,6 +20,14 @@ mgr.MaterialScattering = 0.07;
 center = mgr.Room / 2;
 % 主扬声器
 mgr.addPrimarySpeaker(101, center + [1 0 0]);
+mgr.addPrimarySpeaker(102, center + [-1 0 0]);
+% 参考麦克风
+rRef = 0.9;
+refMicIds = uint32([401 402 403 404]);
+mgr.addReferenceMicrophone(refMicIds(1), center + [rRef 0 0]);
+mgr.addReferenceMicrophone(refMicIds(2), center - [rRef 0 0]);
+mgr.addReferenceMicrophone(refMicIds(3), center + [0 rRef 0]);
+mgr.addReferenceMicrophone(refMicIds(4), center - [0 rRef 0]);
 
 % 次扬声器
 r1 = 0.6;
@@ -42,10 +50,15 @@ mgr.build(false);  % 批量生成 RIR
 rng(42); % 固定随机种子以确保可重复性
 duration = 10;                           % 秒
 f_low = 100;    % Hz
-f_high = 2000; % Hz
+f_high = 1500; % Hz
 [noise, time] = utils.wn_gen(mgr.Fs, duration, f_low, f_high);
-x = noise ./ max(abs(noise), [], 1); % 按列归一化
-d = mgr.calculateDesiredSignal(x, length(time)); % 期望信号
+sourceSignal = noise ./ max(abs(noise), [], 1); % 主噪声源信号
+d = mgr.calculateDesiredSignal(sourceSignal, length(time));
+x = mgr.calculateReferenceSignal(sourceSignal, length(time));
+
+refScale = max(abs(x), [], 1);
+refScale(refScale < eps) = 1;
+x = x ./ refScale; % 按列归一化参考信号
 
 %% 算法仿真
 
@@ -78,16 +91,16 @@ if ismember("ADFxLMS", selected_algorithms)
     % 节点
     mu_adf = 1e-4;
     node1 = algorithms.ADFxLMS.Node(1, mu_adf);
-    node1.addRefMic(101); node1.addSecSpk(201); node1.addErrMic(301);
+    node1.addRefMic(refMicIds(1)); node1.addSecSpk(201); node1.addErrMic(301);
 
     node2 = algorithms.ADFxLMS.Node(2, mu_adf);
-    node2.addRefMic(101); node2.addSecSpk(202); node2.addErrMic(302);
+    node2.addRefMic(refMicIds(2)); node2.addSecSpk(202); node2.addErrMic(302);
 
     node3 = algorithms.ADFxLMS.Node(3, mu_adf);
-    node3.addRefMic(101); node3.addSecSpk(203); node3.addErrMic(303);
+    node3.addRefMic(refMicIds(3)); node3.addSecSpk(203); node3.addErrMic(303);
 
     node4 = algorithms.ADFxLMS.Node(4, mu_adf);
-    node4.addRefMic(101); node4.addSecSpk(204); node4.addErrMic(304);
+    node4.addRefMic(refMicIds(4)); node4.addSecSpk(204); node4.addErrMic(304);
 
     % 网络
     net_adf = topology.Network();
@@ -118,16 +131,16 @@ end
 if ismember("ADFxLMS-BC", selected_algorithms)
     mu_adf_bc = 1e-4;
     node1_bc = algorithms.ADFxLMS_BC.Node(1, mu_adf_bc);
-    node1_bc.addRefMic(101); node1_bc.addSecSpk(201); node1_bc.addErrMic(301);
+    node1_bc.addRefMic(refMicIds(1)); node1_bc.addSecSpk(201); node1_bc.addErrMic(301);
 
     node2_bc = algorithms.ADFxLMS_BC.Node(2, mu_adf_bc);
-    node2_bc.addRefMic(101); node2_bc.addSecSpk(202); node2_bc.addErrMic(302);
+    node2_bc.addRefMic(refMicIds(2)); node2_bc.addSecSpk(202); node2_bc.addErrMic(302);
 
     node3_bc = algorithms.ADFxLMS_BC.Node(3, mu_adf_bc);
-    node3_bc.addRefMic(101); node3_bc.addSecSpk(203); node3_bc.addErrMic(303);
+    node3_bc.addRefMic(refMicIds(3)); node3_bc.addSecSpk(203); node3_bc.addErrMic(303);
 
     node4_bc = algorithms.ADFxLMS_BC.Node(4, mu_adf_bc);
-    node4_bc.addRefMic(101); node4_bc.addSecSpk(204); node4_bc.addErrMic(304);
+    node4_bc.addRefMic(refMicIds(4)); node4_bc.addSecSpk(204); node4_bc.addErrMic(304);
 
     net_bc = topology.Network();
     net_bc.addNode(node1_bc); net_bc.addNode(node2_bc);
@@ -155,16 +168,16 @@ end
 if ismember("Diff-FxLMS", selected_algorithms)
     mu_diff = 1e-4;
     node1_diff = algorithms.Diff_FxLMS.Node(1, mu_diff);
-    node1_diff.addRefMic(101); node1_diff.addSecSpk(201); node1_diff.addErrMic(301);
+    node1_diff.addRefMic(refMicIds(1)); node1_diff.addSecSpk(201); node1_diff.addErrMic(301);
 
     node2_diff = algorithms.Diff_FxLMS.Node(2, mu_diff);
-    node2_diff.addRefMic(101); node2_diff.addSecSpk(202); node2_diff.addErrMic(302);
+    node2_diff.addRefMic(refMicIds(2)); node2_diff.addSecSpk(202); node2_diff.addErrMic(302);
 
     node3_diff = algorithms.Diff_FxLMS.Node(3, mu_diff);
-    node3_diff.addRefMic(101); node3_diff.addSecSpk(203); node3_diff.addErrMic(303);
+    node3_diff.addRefMic(refMicIds(3)); node3_diff.addSecSpk(203); node3_diff.addErrMic(303);
 
     node4_diff = algorithms.Diff_FxLMS.Node(4, mu_diff);
-    node4_diff.addRefMic(101); node4_diff.addSecSpk(204); node4_diff.addErrMic(304);
+    node4_diff.addRefMic(refMicIds(4)); node4_diff.addSecSpk(204); node4_diff.addErrMic(304);
 
     net_diff = topology.Network();
     net_diff.addNode(node1_diff); net_diff.addNode(node2_diff);
@@ -192,16 +205,16 @@ end
 if ismember("DCFxLMS", selected_algorithms)
     mu_dcf = 1e-4;
     node1_dcf = algorithms.DCFxLMS.Node(1, mu_dcf);
-    node1_dcf.addRefMic(101); node1_dcf.addSecSpk(201); node1_dcf.addErrMic(301);
+    node1_dcf.addRefMic(refMicIds(1)); node1_dcf.addSecSpk(201); node1_dcf.addErrMic(301);
 
     node2_dcf = algorithms.DCFxLMS.Node(2, mu_dcf);
-    node2_dcf.addRefMic(101); node2_dcf.addSecSpk(202); node2_dcf.addErrMic(302);
+    node2_dcf.addRefMic(refMicIds(2)); node2_dcf.addSecSpk(202); node2_dcf.addErrMic(302);
 
     node3_dcf = algorithms.DCFxLMS.Node(3, mu_dcf);
-    node3_dcf.addRefMic(101); node3_dcf.addSecSpk(203); node3_dcf.addErrMic(303);
+    node3_dcf.addRefMic(refMicIds(3)); node3_dcf.addSecSpk(203); node3_dcf.addErrMic(303);
 
     node4_dcf = algorithms.DCFxLMS.Node(4, mu_dcf);
-    node4_dcf.addRefMic(101); node4_dcf.addSecSpk(204); node4_dcf.addErrMic(304);
+    node4_dcf.addRefMic(refMicIds(4)); node4_dcf.addSecSpk(204); node4_dcf.addErrMic(304);
 
     net_dcf = topology.Network();
     net_dcf.addNode(node1_dcf); net_dcf.addNode(node2_dcf);
@@ -227,16 +240,16 @@ end
 if ismember("CDFxLMS", selected_algorithms)
     mu_cdf = 1e-4;
     node1_cdf = algorithms.CDFxLMS.Node(1, mu_cdf);
-    node1_cdf.addRefMic(101); node1_cdf.addSecSpk(201); node1_cdf.addErrMic(301);
+    node1_cdf.addRefMic(refMicIds(1)); node1_cdf.addSecSpk(201); node1_cdf.addErrMic(301);
 
     node2_cdf = algorithms.CDFxLMS.Node(2, mu_cdf);
-    node2_cdf.addRefMic(101); node2_cdf.addSecSpk(202); node2_cdf.addErrMic(302);
+    node2_cdf.addRefMic(refMicIds(2)); node2_cdf.addSecSpk(202); node2_cdf.addErrMic(302);
 
     node3_cdf = algorithms.CDFxLMS.Node(3, mu_cdf);
-    node3_cdf.addRefMic(101); node3_cdf.addSecSpk(203); node3_cdf.addErrMic(303);
+    node3_cdf.addRefMic(refMicIds(3)); node3_cdf.addSecSpk(203); node3_cdf.addErrMic(303);
 
     node4_cdf = algorithms.CDFxLMS.Node(4, mu_cdf);
-    node4_cdf.addRefMic(101); node4_cdf.addSecSpk(204); node4_cdf.addErrMic(304);
+    node4_cdf.addRefMic(refMicIds(4)); node4_cdf.addSecSpk(204); node4_cdf.addErrMic(304);
 
     net_cdf = topology.Network();
     net_cdf.addNode(node1_cdf); net_cdf.addNode(node2_cdf);
@@ -282,16 +295,16 @@ if ismember("MGDFxLMS", selected_algorithms)
     mu_mgd = 1e-4;
     lc = 16; % 交叉路径补偿滤波器长度
     node1_mgd = algorithms.MGDFxLMS.Node(1, mu_mgd, lc);
-    node1_mgd.addRefMic(101); node1_mgd.addSecSpk(201); node1_mgd.addErrMic(301);
+    node1_mgd.addRefMic(refMicIds(1)); node1_mgd.addSecSpk(201); node1_mgd.addErrMic(301);
 
     node2_mgd = algorithms.MGDFxLMS.Node(2, mu_mgd, lc);
-    node2_mgd.addRefMic(101); node2_mgd.addSecSpk(202); node2_mgd.addErrMic(302);
+    node2_mgd.addRefMic(refMicIds(2)); node2_mgd.addSecSpk(202); node2_mgd.addErrMic(302);
 
     node3_mgd = algorithms.MGDFxLMS.Node(3, mu_mgd, lc);
-    node3_mgd.addRefMic(101); node3_mgd.addSecSpk(203); node3_mgd.addErrMic(303);
+    node3_mgd.addRefMic(refMicIds(3)); node3_mgd.addSecSpk(203); node3_mgd.addErrMic(303);
 
     node4_mgd = algorithms.MGDFxLMS.Node(4, mu_mgd, lc);
-    node4_mgd.addRefMic(101); node4_mgd.addSecSpk(204); node4_mgd.addErrMic(304);
+    node4_mgd.addRefMic(refMicIds(4)); node4_mgd.addSecSpk(204); node4_mgd.addErrMic(304);
 
     net_mgd = topology.Network();
     net_mgd.addNode(node1_mgd); net_mgd.addNode(node2_mgd);

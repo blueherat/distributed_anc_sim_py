@@ -58,7 +58,7 @@ classdef CircularArray < handle
             arguments
                 obj
                 mgr
-                type (1,1) string {mustBeMember(type, ["mic", "secondary"])}
+                type (1,1) string {mustBeMember(type, ["mic", "secondary", "reference"])}
             end
 
             switch type
@@ -66,6 +66,8 @@ classdef CircularArray < handle
                     obj.registerMics(mgr);
                 case "secondary"
                     obj.registerSpeakers(mgr);
+                case "reference"
+                    obj.registerReferenceMics(mgr);
             end
         end
 
@@ -80,6 +82,17 @@ classdef CircularArray < handle
 
             for i = 1:N
                 mgr.addErrorMicrophone(ids(i), pos(i, :));
+            end
+        end
+
+        function registerReferenceMics(obj, mgr)
+            % 专门负责注册参考麦克风
+            ids = obj.ElementIDs;
+            pos = obj.ElementPositions;
+            N = obj.NumElements;
+
+            for i = 1:N
+                mgr.addReferenceMicrophone(ids(i), pos(i, :));
             end
         end
 

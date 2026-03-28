@@ -24,13 +24,17 @@ x               = params.referenceSignal;
 d               = params.desiredSignal;
 
 % 从rirManager获取参数
-keyPriSpks = keys(rirManager.PrimarySpeakers);
+keyRefMics = keys(rirManager.ReferenceMicrophones);
 keySecSpks = keys(rirManager.SecondarySpeakers);
 keyErrMics = keys(rirManager.ErrorMicrophones);
 
-numPriSpks      = numEntries(rirManager.PrimarySpeakers);
+numRefMics      = numEntries(rirManager.ReferenceMicrophones);
 numSecSpks      = numEntries(rirManager.SecondarySpeakers);
 numErrMics      = numEntries(rirManager.ErrorMicrophones);
+
+if size(x, 2) ~= numRefMics
+    error('referenceSignal columns (%d) must match number of reference microphones (%d).', size(x, 2), numRefMics);
+end
 
 nSamples = length(time);
 
@@ -43,7 +47,7 @@ for i = keySecSpks'
     end
 end
 
-x_taps = zeros(max([L, max_Ls_hat]), numPriSpks);
+x_taps = zeros(max([L, max_Ls_hat]), numRefMics);
 
 e = zeros(nSamples, numErrMics); % 误差信号
 
@@ -119,7 +123,7 @@ for n = 1:nSamples
     % 3.2. 生成控制信号 y(n) (分布式)
     for keyNode = keys(network.Nodes)'
         node = network.Nodes(keyNode);
-        y = node.W' * x_taps(1:L, keyPriSpks == node.RefMicId);
+        y = node.W' * x_taps(1:L, keyRefMics == node.RefMicId);
         y_taps{keySecSpks == node.SecSpkId} = [y; y_taps{keySecSpks == node.SecSpkId}(1:end-1)];
     end
 
@@ -140,7 +144,7 @@ for n = 1:nSamples
         node = network.Nodes(keyNode);
         S_hat = rirManager.getSecondaryRIR(node.SecSpkId, node.ErrMicId);
         Ls_hat = length(S_hat);
-        xf = S_hat * x_taps(1:Ls_hat, keyPriSpks == node.RefMicId);
+        xf = S_hat * x_taps(1:Ls_hat, keyRefMics == node.RefMicId);
         node.xf_taps = [xf; node.xf_taps(1:end-1)];
         node.gradient = e(n, keyErrMics == node.ErrMicId) * node.xf_taps;
         node.direction = e(n, keyErrMics == node.ErrMicId) * node.xf_taps;
@@ -164,7 +168,7 @@ for n = 1:nSamples
             valid_start = node.Lc;
             % 提取正确的部分 (长度为 N)
             correction = full_conv(valid_start : valid_start + L - 1);
-            
+
             node.direction = node.direction + correction;
         end
     end

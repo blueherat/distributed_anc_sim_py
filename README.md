@@ -63,8 +63,9 @@
 
 该类负责管理所有声学相关的参数：
 - **房间属性**: 尺寸、采样率、墙壁、空气吸收率 等。
-- **设备管理**: 管理主声源（噪声源）、次级声源（控制声源）和误差麦克风的位置。
-- **RIR 计算**: 调用 Audio Toolbox 的acousticRoomResponse函数生成主通路（Primary-Mic）和次级通路（Secondary-Mic）的房间冲激响应 (RIR)。
+- **设备管理**: 管理主声源（噪声源）、参考麦克风、次级声源（控制声源）和误差麦克风的位置。
+- **RIR 计算**: 调用 Audio Toolbox 的 `acousticRoomResponse` 函数生成主通路（Primary-Error Mic）、参考通路（Primary-Reference Mic）和次级通路（Secondary-Error Mic）的房间冲激响应 (RIR)。
+- **参考信号生成**: 通过 `calculateReferenceSignal` 将主噪声源信号卷积到参考麦克风，得到多通道参考输入。
 
 ### `topology.Network` & `topology.Node`
 
@@ -72,7 +73,7 @@
 - `topology.Node`: 代表一个物理节点，包含其自身的 ID 以及关联的参考麦克风、次级扬声器和误差麦克风。
 - `topology.Network`: 管理所有节点，并通过 `connectNodes` 方法定义节点之间的通信链接（拓扑结构）。
 
-> **注意**: 当前仿真使用理想参考信号，即直接使用主噪声源的信号。因此，在概念上“参考麦克风”的位置与“主扬声器”（噪声源）的位置是相同的。仿真程序中有关于此的变量命名有所混用。
+> **注意**: 当前版本已支持真实参考通路建模，参考信号不再是理想直通，而是由主噪声源通过房间通路传播到参考麦克风后生成。
 
 ### `algorithms` 包
 
@@ -90,9 +91,39 @@
 您可以轻松地在 `demo.m` 脚本中修改参数以进行不同的仿真实验：
 
 - **声学环境**: 修改 `mgr.Room`、`mgr.MaterialAbsorption` 等参数。
-- **设备布局**: 使用 `mgr.addPrimarySpeaker`, `mgr.addSecondarySpeaker`, `mgr.addErrorMicrophone` 函数调整设备位置。
+- **设备布局**: 使用 `mgr.addPrimarySpeaker`, `mgr.addReferenceMicrophone`, `mgr.addSecondarySpeaker`, `mgr.addErrorMicrophone` 函数调整设备位置。
 - **网络拓扑**: 使用 `node.addRefMic`、 `node.addSecSpk`、`node.addErrMic` 函数配置节点，并使用 `net.connectNodes` 修改节点连接关系。
 - **算法参数**: 调整 `params.L` (滤波器长度) 和 `params.mu` (步长) 等。
+
+## Python 版本（pyroomacoustics）
+
+仓库已提供 Python 等价迁移版本（目录 `py_anc`），核心特点：
+
+- 使用 `pyroomacoustics` 完成房间建模与 RIR 生成。
+- 与 MATLAB 版本保持一致的模块结构：`acoustics / algorithms / topology / utils / viz`。
+- 支持多参考麦克风输入与全部算法迁移（CFxLMS、ADFxLMS、ADFxLMS-BC、Diff-FxLMS、DCFxLMS、CDFxLMS、MGDFxLMS）。
+
+### Python 依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+### 运行（CFxLMS 速度测试）
+
+```bash
+python python_scripts/run_experiment.py --algorithms CFxLMS --duration 10 --fs 4000 --f-low 100 --f-high 1500 --L 1024 --mu 1e-4
+```
+
+### 运行（迁移等价性批量测试）
+
+```bash
+python python_scripts/run_experiment.py --algorithms CFxLMS,ADFxLMS,ADFxLMS-BC,Diff-FxLMS,DCFxLMS,CDFxLMS,MGDFxLMS --duration 2 --fs 4000 --f-low 100 --f-high 1500 --L 1024 --mu 1e-4 --output-json python_scripts/equivalence_py_summary.json
+```
+
+### pyroomacoustics API 文档
+
+请参考 `docs/pyroomacoustics_api_notes.md`。
 
 ## To-Do
 1. 修复主噪声源和参考麦克风命名混用的问题，对当前的理想参考信号模式通过显式的方式完成

@@ -1,107 +1,110 @@
 function results = CFxLMS(params)
-    % CFxLMS 集中式前馈主动噪声控制FxLMS算法
-    %
-    % 输入:
-    %   params: 包含所有仿真参数的结构体。
-    %       - params.time: 离散时间轴
-    %       - params.rirManager: RIRManager对象，用于获取脉冲响应
-    %       - params.L: 控制滤波器的长度
-    %       - params.mu: LMS算法的步长
-    %       - params.referenceSignal: 参考信号
-    %       - params.desiredSignal: 期望信号
-    %
-    % 输出:
-    %   results: 包含仿真结果的结构体。
-    %       - results.err_hist: 麦克风处的误差信号历史
-    %       - results.filter_coeffs: 各节点最终的控制器滤波器系数
-    %% 1. 解包参数
-    time            = params.time;
-    rirManager      = params.rirManager;
-    L               = params.L;
-    mu              = params.mu;
-    x               = params.referenceSignal; % 参考信号
-    d               = params.desiredSignal;   % 期望信号
+% CFxLMS 集中式前馈主动噪声控制FxLMS算法
+%
+% 输入:
+%   params: 包含所有仿真参数的结构体。
+%       - params.time: 离散时间轴
+%       - params.rirManager: RIRManager对象，用于获取脉冲响应
+%       - params.L: 控制滤波器的长度
+%       - params.mu: LMS算法的步长
+%       - params.referenceSignal: 参考信号
+%       - params.desiredSignal: 期望信号
+%
+% 输出:
+%   results: 包含仿真结果的结构体。
+%       - results.err_hist: 麦克风处的误差信号历史
+%       - results.filter_coeffs: 各节点最终的控制器滤波器系数
+%% 1. 解包参数
+time            = params.time;
+rirManager      = params.rirManager;
+L               = params.L;
+mu              = params.mu;
+x               = params.referenceSignal; % 参考信号
+d               = params.desiredSignal;   % 期望信号
 
-    % 从rirManager获取参数
-    keyPriSpks = keys(rirManager.PrimarySpeakers);
-    keySecSpks = keys(rirManager.SecondarySpeakers);
-    keyErrMics = keys(rirManager.ErrorMicrophones);
+% 从rirManager获取参数
+keySecSpks = keys(rirManager.SecondarySpeakers);
+keyErrMics = keys(rirManager.ErrorMicrophones);
 
-    numPriSpks      = numEntries(rirManager.PrimarySpeakers);
-    numSecSpks      = numEntries(rirManager.SecondarySpeakers);
-    numErrMics      = numEntries(rirManager.ErrorMicrophones);
-    
-    nSamples = length(time);
+numRefMics      = numEntries(rirManager.ReferenceMicrophones);
+numSecSpks      = numEntries(rirManager.SecondarySpeakers);
+numErrMics      = numEntries(rirManager.ErrorMicrophones);
 
-    %% 2. 初始化
-    max_Ls_hat = 0;
-    for i = keySecSpks'
-        Ls_hat = length(rirManager.getSecondaryRIR(i, keyErrMics(1)));
-        if Ls_hat > max_Ls_hat
-            max_Ls_hat = Ls_hat;
-        end
+if size(x, 2) ~= numRefMics
+    error('referenceSignal columns (%d) must match number of reference microphones (%d).', size(x, 2), numRefMics);
+end
+
+nSamples = length(time);
+
+%% 2. 初始化
+max_Ls_hat = 0;
+for i = keySecSpks'
+    Ls_hat = length(rirManager.getSecondaryRIR(i, keyErrMics(1)));
+    if Ls_hat > max_Ls_hat
+        max_Ls_hat = Ls_hat;
     end
-    W = zeros(L, numPriSpks, numSecSpks);
+end
+W = zeros(L, numRefMics, numSecSpks);
 
-    x_taps = zeros(max([L, max_Ls_hat]), numPriSpks);
+x_taps = zeros(max([L, max_Ls_hat]), numRefMics);
 
-    xf_taps = zeros(L, numPriSpks, numSecSpks, numErrMics);
+xf_taps = zeros(L, numRefMics, numSecSpks, numErrMics);
 
-    e = zeros(nSamples, numErrMics); % 误差信号
+e = zeros(nSamples, numErrMics); % 误差信号
 
-    y_taps = cell(numSecSpks);   % 控制信号
+y_taps = cell(numSecSpks);   % 控制信号
+for k = 1:numSecSpks
+    y_taps{k} = zeros(length(rirManager.getSecondaryRIR(keySecSpks(k), keyErrMics(1))), 1);
+end
+
+%% 3. 主循环
+disp('开始集中式FxLMS仿真...');
+for n = 1:nSamples
+    % 3.1. 更新参考信号状态向量
+    x_taps = [x(n, :); x_taps(1:end-1, :)];
+
+    % 3.2. 生成控制信号 y(n)
     for k = 1:numSecSpks
-        y_taps{k} = zeros(length(rirManager.getSecondaryRIR(keySecSpks(k), keyErrMics(1))), 1);
+        y = sum(W(:, :, k) .* x_taps(1:L, :), 'all');
+        y_taps{k} = [y; y_taps{k}(1:end-1)];
     end
 
-    %% 3. 主循环
-    disp('开始集中式FxLMS仿真...');
-    for n = 1:nSamples
-        % 3.1. 更新参考信号状态向量
-        x_taps = [x(n, :); x_taps(1:end-1, :)];
-
-        % 3.2. 生成控制信号 y(n)
+    % 3.3. 计算误差信号 e(n)
+    for m = 1:numErrMics
+        yf = 0;
         for k = 1:numSecSpks
-            y = sum(W(:, :, k) .* x_taps(1:L, :), 'all');
-            y_taps{k} = [y; y_taps{k}(1:end-1)];
+            S = rirManager.getSecondaryRIR(keySecSpks(k), keyErrMics(m));
+            Ls = length(S);
+            yf = yf + S * y_taps{k}(1:Ls);
         end
+        e(n, m) = d(n, m) + yf;
+    end
 
-        % 3.3. 计算误差信号 e(n)
+    % 3.4. 滤波参考信号 x_filtered(n)
+    xf = zeros(1, numRefMics, numSecSpks, numErrMics);
+    for k = 1:numSecSpks
         for m = 1:numErrMics
-            yf = 0;
-            for k = 1:numSecSpks
-                S = rirManager.getSecondaryRIR(keySecSpks(k), keyErrMics(m));
-                Ls = length(S);
-                yf = yf + S * y_taps{k}(1:Ls);
-            end
-            e(n, m) = d(n, m) + yf;
-        end
-
-        % 3.4. 滤波参考信号 x_filtered(n)
-        xf = zeros(1, numPriSpks, numSecSpks, numErrMics);
-        for k = 1:numSecSpks
-            for m = 1:numErrMics
-                S = rirManager.getSecondaryRIR(keySecSpks(k), keyErrMics(m));
-                Ls_hat = length(S);
-                xf(1, :, k, m) = S * x_taps(1:Ls_hat, :);
-            end
-        end
-        
-        xf_taps = [xf; xf_taps(1:end-1, :, :, :)];
-
-        % 3.5. 更新滤波器系数 W(n+1)
-        for k = 1:numSecSpks
-            for m = 1:numErrMics
-                W(:, :, k) = W(:, :, k) - mu * squeeze(xf_taps(:, :, k, m)) * e(n, m);
-            end
+            S = rirManager.getSecondaryRIR(keySecSpks(k), keyErrMics(m));
+            Ls_hat = length(S);
+            xf(1, :, k, m) = S * x_taps(1:Ls_hat, :);
         end
     end
 
-    %% 4. 打包结果
-    filter_coeffs = dictionary;
+    xf_taps = [xf; xf_taps(1:end-1, :, :, :)];
+
+    % 3.5. 更新滤波器系数 W(n+1)
     for k = 1:numSecSpks
-        filter_coeffs(keySecSpks(k)) = {squeeze(W(:, :, k))};
+        for m = 1:numErrMics
+            W(:, :, k) = W(:, :, k) - mu * squeeze(xf_taps(:, :, k, m)) * e(n, m);
+        end
     end
-    results.err_hist = e;
-    results.filter_coeffs = filter_coeffs;
+end
+
+%% 4. 打包结果
+filter_coeffs = dictionary;
+for k = 1:numSecSpks
+    filter_coeffs(keySecSpks(k)) = {squeeze(W(:, :, k))};
+end
+results.err_hist = e;
+results.filter_coeffs = filter_coeffs;
 end
