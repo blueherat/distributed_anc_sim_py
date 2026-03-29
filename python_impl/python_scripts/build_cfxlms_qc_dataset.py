@@ -56,8 +56,8 @@ class DatasetBuildConfig:
     num_nodes: int = 3
     min_secondary_node_distance: float = 0.25
     min_device_distance: float = 0.10
-    neighbor_causality_tolerance: float = 0.25
-    max_causality_violations: int = 6
+    neighbor_causality_tolerance: float = 0.0
+    max_causality_violations: int = 0
 
     azimuth_spacing_base: tuple[float, ...] = (0.0, 120.0, 240.0)
     azimuth_spacing_jitter: float = 6.0
@@ -91,6 +91,16 @@ class DatasetBuildConfig:
     def ref_window_samples(self) -> int:
         return int(round(self.fs * self.ref_window_ms / 1000.0))
 
+    @property
+    def s_feature_dim(self) -> int:
+        # 采用完整次级通路矩阵: [sec, err, rir_len]
+        return int(self.num_nodes * self.num_nodes * self.rir_store_len)
+
+    @property
+    def w_feature_dim(self) -> int:
+        # 采用完整控制滤波器矩阵: [sec, ref, filter_len]
+        return int(self.num_nodes * self.num_nodes * self.filter_len)
+
 
 @dataclass
 class RoomSample:
@@ -101,6 +111,7 @@ class RoomSample:
     s_paths: np.ndarray
     s_path_lengths: np.ndarray
     w_opt: np.ndarray
+    w_full: np.ndarray
     gcc_phat: np.ndarray
     psd_features: np.ndarray
     qc_metrics: dict[str, float]
@@ -216,7 +227,8 @@ class AcousticScenarioSampler:
         sec_positions: np.ndarray,
         err_positions: np.ndarray,
     ) -> bool:
-        # 邻居因果约束（带容差与可容忍违例数），避免布局筛选过严导致有效样本稀缺。
+        # 非因果约束: 不允许邻居扬声器到本节点参考麦克风距离大于到本节点误差麦克风距离。
+        # 即要求 d(sec_j, ref_i) <= d(sec_j, err_i)。
         violations = 0
         for i in range(self.cfg.num_nodes):
             for j in range(self.cfg.num_nodes):
@@ -224,7 +236,7 @@ class AcousticScenarioSampler:
                     continue
                 d_ref = float(np.linalg.norm(sec_positions[j] - ref_positions[i]))
                 d_err = float(np.linalg.norm(sec_positions[j] - err_positions[i]))
-                if d_ref + float(self.cfg.neighbor_causality_tolerance) < d_err:
+                if d_ref > d_err + float(self.cfg.neighbor_causality_tolerance):
                     violations += 1
                     if violations > int(self.cfg.max_causality_violations):
                         return False
@@ -401,30 +413,35 @@ class ANCQualityController:
     ) -> tuple[dict[str, float], np.ndarray, np.ndarray]:
         ratios: list[float] = []
 
-        s_paths = np.zeros((self.cfg.num_nodes, self.cfg.rir_store_len), dtype=np.float32)
-        s_lengths = np.zeros((self.cfg.num_nodes,), dtype=np.int32)
+        # 完整次级通路张量: [sec_idx, err_idx, rir_tap]
+        s_paths = np.zeros((self.cfg.num_nodes, self.cfg.num_nodes, self.cfg.rir_store_len), dtype=np.float32)
+        s_lengths = np.zeros((self.cfg.num_nodes, self.cfg.num_nodes), dtype=np.int32)
+
+        for k in range(self.cfg.num_nodes):
+            sec_id = int(sec_ids[k])
+            for m in range(self.cfg.num_nodes):
+                err_id = int(err_ids[m])
+
+                s_km = np.asarray(mgr.get_secondary_rir(sec_id, err_id), dtype=float)
+                if not self._path_is_legal(s_km):
+                    raise QCError("rir:illegal_secondary_path")
+
+                keep = min(self.cfg.rir_store_len, s_km.size)
+                s_paths[k, m, :keep] = s_km[:keep].astype(np.float32)
+                s_lengths[k, m] = int(keep)
+
+                ratio_s = self._direct_energy_ratio(
+                    s_km,
+                    np.asarray(sampled["sec_positions"][k], dtype=float),
+                    np.asarray(sampled["err_positions"][m], dtype=float),
+                    int(mgr.fs),
+                    float(mgr.sound_speed),
+                )
+                ratios.append(ratio_s)
 
         for i in range(self.cfg.num_nodes):
-            sec_id = int(sec_ids[i])
-            err_id = int(err_ids[i])
             ref_id = int(ref_ids[i])
-
-            s_self = np.asarray(mgr.get_secondary_rir(sec_id, err_id), dtype=float)
-            if not self._path_is_legal(s_self):
-                raise QCError("rir:illegal_secondary_path")
-
-            keep = min(self.cfg.rir_store_len, s_self.size)
-            s_paths[i, :keep] = s_self[:keep].astype(np.float32)
-            s_lengths[i] = int(keep)
-
-            ratio_s = self._direct_energy_ratio(
-                s_self,
-                np.asarray(sampled["sec_positions"][i], dtype=float),
-                np.asarray(sampled["err_positions"][i], dtype=float),
-                int(mgr.fs),
-                float(mgr.sound_speed),
-            )
-            ratios.append(ratio_s)
+            err_id = int(err_ids[i])
 
             p_ref = np.asarray(mgr.get_reference_rir(source_id, ref_id), dtype=float)
             p_err = np.asarray(mgr.get_primary_rir(source_id, err_id), dtype=float)
@@ -456,12 +473,14 @@ class ANCQualityController:
 
         # ANC 可控性预筛：若次级路径能量相对主路径过低，先淘汰，避免进入昂贵的 CFxLMS 迭代。
         control_ratios = []
-        for i in range(self.cfg.num_nodes):
-            p_err = np.asarray(mgr.get_primary_rir(source_id, int(err_ids[i])), dtype=float)
-            s_self = np.asarray(mgr.get_secondary_rir(int(sec_ids[i]), int(err_ids[i])), dtype=float)
+        for m in range(self.cfg.num_nodes):
+            p_err = np.asarray(mgr.get_primary_rir(source_id, int(err_ids[m])), dtype=float)
             p_norm = float(np.linalg.norm(p_err)) + np.finfo(float).eps
-            s_norm = float(np.linalg.norm(s_self))
-            control_ratios.append(s_norm / p_norm)
+            s_norm_best = 0.0
+            for k in range(self.cfg.num_nodes):
+                s_km = np.asarray(mgr.get_secondary_rir(int(sec_ids[k]), int(err_ids[m])), dtype=float)
+                s_norm_best = max(s_norm_best, float(np.linalg.norm(s_km)))
+            control_ratios.append(s_norm_best / p_norm)
         control_ratio_min = float(np.min(control_ratios))
         if control_ratio_min < 0.10:
             raise QCError("rir:insufficient_secondary_control_energy")
@@ -541,18 +560,26 @@ class ANCQualityController:
         if best is None:
             raise QCError("anc:noise_reduction_qc_failed")
 
-        # 提取每个节点“本节点参考通道”的 512 阶滤波器，形成 [3, 512]。
+        # 提取完整控制滤波器张量 [sec, ref, L]，并保留对角滤波器兼容旧流程。
         w_opt = np.zeros((self.cfg.num_nodes, self.cfg.filter_len), dtype=np.float32)
+        w_full = np.zeros((self.cfg.num_nodes, self.cfg.num_nodes, self.cfg.filter_len), dtype=np.float32)
         filter_coeffs = best["results"]["filter_coeffs"]
-        for i, sec_id in enumerate(sec_ids):
-            w_full = np.asarray(filter_coeffs[int(sec_id)], dtype=float)
-            if w_full.ndim != 2 or w_full.shape[0] < self.cfg.filter_len:
+        for sec_idx, sec_id in enumerate(sec_ids):
+            w_mat = np.asarray(filter_coeffs[int(sec_id)], dtype=float)
+            if w_mat.ndim != 2 or w_mat.shape[0] < self.cfg.filter_len:
                 raise QCError("anc:unexpected_filter_shape")
 
-            ref_idx = min(i, w_full.shape[1] - 1)
-            w_opt[i] = w_full[: self.cfg.filter_len, ref_idx].astype(np.float32)
+            keep_l = min(self.cfg.filter_len, w_mat.shape[0])
+            keep_r = min(self.cfg.num_nodes, w_mat.shape[1])
+            if keep_r <= 0:
+                raise QCError("anc:unexpected_filter_shape")
+            w_full[sec_idx, :keep_r, :keep_l] = w_mat[:keep_l, :keep_r].T.astype(np.float32)
+
+            ref_idx = min(sec_idx, keep_r - 1)
+            w_opt[sec_idx] = w_full[sec_idx, ref_idx, : self.cfg.filter_len].astype(np.float32)
 
         best["w_opt"] = w_opt
+        best["w_full"] = w_full
         return best
 
 
@@ -570,7 +597,7 @@ class HDF5DatasetWriter:
     def _build_layout(self) -> None:
         n = int(self.cfg.target_rooms)
 
-        self.h5.attrs["schema"] = "CFxLMS_ANC_QC_Dataset_v1"
+        self.h5.attrs["schema"] = "CFxLMS_ANC_QC_Dataset_v2_cross_secondary"
         self.h5.attrs["config_json"] = json.dumps(asdict(self.cfg), ensure_ascii=False)
 
         raw = self.h5.create_group("raw")
@@ -593,9 +620,17 @@ class HDF5DatasetWriter:
         room.create_dataset("image_source_order", shape=(n,), dtype="i4")
 
         raw.create_dataset("x_ref", shape=(n, self.cfg.num_nodes, self.cfg.ref_window_samples), dtype="f4")
+        # 兼容旧流程: 仅保留对角线(本节点)次级通路。
         raw.create_dataset("S_paths", shape=(n, self.cfg.num_nodes, self.cfg.rir_store_len), dtype="f4")
         raw.create_dataset("S_path_lengths", shape=(n, self.cfg.num_nodes), dtype="i4")
+        # 新流程: 保存完整次级通路矩阵 [sec, err, rir]。
+        raw.create_dataset("S_paths_full", shape=(n, self.cfg.num_nodes, self.cfg.num_nodes, self.cfg.rir_store_len), dtype="f4")
+        raw.create_dataset("S_path_lengths_full", shape=(n, self.cfg.num_nodes, self.cfg.num_nodes), dtype="i4")
+
+        # 兼容旧流程: 对角线控制滤波器 [node, L]。
         raw.create_dataset("W_opt", shape=(n, self.cfg.num_nodes, self.cfg.filter_len), dtype="f4")
+        # 新流程: 完整控制滤波器矩阵 [sec, ref, L]。
+        raw.create_dataset("W_full", shape=(n, self.cfg.num_nodes, self.cfg.num_nodes, self.cfg.filter_len), dtype="f4")
 
         qc = raw.create_group("qc_metrics")
         qc.create_dataset("nr_first_db", shape=(n,), dtype="f4")
@@ -604,6 +639,7 @@ class HDF5DatasetWriter:
         qc.create_dataset("direct_ratio_min", shape=(n,), dtype="f4")
         qc.create_dataset("control_ratio_min", shape=(n,), dtype="f4")
         qc.create_dataset("mu_used", shape=(n,), dtype="f4")
+        qc.create_dataset("source_seed", shape=(n,), dtype="i8")
         qc.create_dataset("warmup_start_s", shape=(n,), dtype="f4")
         qc.create_dataset("warmup_start_index", shape=(n,), dtype="i4")
 
@@ -614,21 +650,21 @@ class HDF5DatasetWriter:
         processed.create_dataset("W_pca_coeffs", shape=(n, self.cfg.svd_components), dtype="f4")
         processed.create_dataset(
             "V_w",
-            shape=(self.cfg.svd_components, self.cfg.num_nodes * self.cfg.filter_len),
+            shape=(self.cfg.svd_components, self.cfg.w_feature_dim),
             dtype="f4",
         )
 
         svd_group = processed.create_group("global_svd")
-        svd_group.create_dataset("S_mean", shape=(self.cfg.num_nodes * self.cfg.rir_store_len,), dtype="f4")
+        svd_group.create_dataset("S_mean", shape=(self.cfg.s_feature_dim,), dtype="f4")
         svd_group.create_dataset(
             "S_components",
-            shape=(self.cfg.svd_components, self.cfg.num_nodes * self.cfg.rir_store_len),
+            shape=(self.cfg.svd_components, self.cfg.s_feature_dim),
             dtype="f4",
         )
-        svd_group.create_dataset("W_mean", shape=(self.cfg.num_nodes * self.cfg.filter_len,), dtype="f4")
+        svd_group.create_dataset("W_mean", shape=(self.cfg.w_feature_dim,), dtype="f4")
         svd_group.create_dataset(
             "W_components",
-            shape=(self.cfg.svd_components, self.cfg.num_nodes * self.cfg.filter_len),
+            shape=(self.cfg.svd_components, self.cfg.w_feature_dim),
             dtype="f4",
         )
 
@@ -650,9 +686,13 @@ class HDF5DatasetWriter:
         self.h5["raw/room_params/image_source_order"][idx] = int(sample.room_params["image_order"])
 
         self.h5["raw/x_ref"][idx] = sample.x_ref.astype(np.float32)
-        self.h5["raw/S_paths"][idx] = sample.s_paths.astype(np.float32)
-        self.h5["raw/S_path_lengths"][idx] = sample.s_path_lengths.astype(np.int32)
+        diag_idx = np.arange(self.cfg.num_nodes, dtype=int)
+        self.h5["raw/S_paths"][idx] = sample.s_paths[diag_idx, diag_idx, :].astype(np.float32)
+        self.h5["raw/S_path_lengths"][idx] = sample.s_path_lengths[diag_idx, diag_idx].astype(np.int32)
+        self.h5["raw/S_paths_full"][idx] = sample.s_paths.astype(np.float32)
+        self.h5["raw/S_path_lengths_full"][idx] = sample.s_path_lengths.astype(np.int32)
         self.h5["raw/W_opt"][idx] = sample.w_opt.astype(np.float32)
+        self.h5["raw/W_full"][idx] = sample.w_full.astype(np.float32)
 
         self.h5["raw/qc_metrics/nr_first_db"][idx] = float(sample.qc_metrics["nr_first_db"])
         self.h5["raw/qc_metrics/nr_last_db"][idx] = float(sample.qc_metrics["nr_last_db"])
@@ -660,6 +700,7 @@ class HDF5DatasetWriter:
         self.h5["raw/qc_metrics/direct_ratio_min"][idx] = float(sample.qc_metrics["direct_ratio_min"])
         self.h5["raw/qc_metrics/control_ratio_min"][idx] = float(sample.qc_metrics["control_ratio_min"])
         self.h5["raw/qc_metrics/mu_used"][idx] = float(sample.qc_metrics["mu_used"])
+        self.h5["raw/qc_metrics/source_seed"][idx] = int(sample.qc_metrics["source_seed"])
         self.h5["raw/qc_metrics/warmup_start_s"][idx] = float(sample.qc_metrics["warmup_start_s"])
         self.h5["raw/qc_metrics/warmup_start_index"][idx] = int(sample.qc_metrics["warmup_start_index"])
 
@@ -721,12 +762,14 @@ class ANCDatasetBuilder:
             err_ids=self.sampler.err_ids,
         )
 
+        # 每条样本单独记录源噪声种子，便于抽查时严格复现同一激励。
+        source_seed = int(self.py_random.randrange(1, 2**31 - 1))
         noise, t = wn_gen(
             fs=int(self.cfg.fs),
             duration=float(self.cfg.noise_duration_s),
             f_low=float(self.cfg.f_low),
             f_high=float(self.cfg.f_high),
-            rng=self.rng,
+            rng=np.random.default_rng(source_seed),
         )
         source_signal = _normalize_columns(noise)
         time_axis = np.asarray(t[:, 0], dtype=float)
@@ -755,6 +798,7 @@ class ANCDatasetBuilder:
             "direct_ratio_min": float(rir_metrics["direct_ratio_min"]),
             "control_ratio_min": float(rir_metrics["control_ratio_min"]),
             "mu_used": float(anc_result["mu"]),
+            "source_seed": int(source_seed),
             "warmup_start_s": float(start_s),
             "warmup_start_index": int(start_idx),
         }
@@ -765,6 +809,7 @@ class ANCDatasetBuilder:
             s_paths=s_paths,
             s_path_lengths=s_lengths,
             w_opt=np.asarray(anc_result["w_opt"], dtype=np.float32),
+            w_full=np.asarray(anc_result["w_full"], dtype=np.float32),
             gcc_phat=gcc,
             psd_features=psd,
             qc_metrics=qc_metrics,
@@ -850,6 +895,16 @@ def _svd_project(x: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray, np.ndar
     return coeff.astype(np.float32), mean.reshape(-1).astype(np.float32), comp.astype(np.float32)
 
 
+def _ensure_dataset(group: h5py.Group, name: str, shape: tuple[int, ...], dtype: str):
+    """确保数据集存在且形状匹配，不匹配时删除并重建。"""
+    if name in group:
+        ds = group[name]
+        if tuple(ds.shape) == tuple(shape) and str(ds.dtype) == str(np.dtype(dtype)):
+            return ds
+        del group[name]
+    return group.create_dataset(name, shape=shape, dtype=dtype)
+
+
 def compute_global_svd(h5_path: str | Path, n_components: int = 32) -> None:
     """全局聚合函数：读取全部 raw 数据并写入 PCA/SVD 降维系数。"""
 
@@ -858,8 +913,15 @@ def compute_global_svd(h5_path: str | Path, n_components: int = 32) -> None:
         raise FileNotFoundError(f"HDF5 文件不存在: {h5_file}")
 
     with h5py.File(str(h5_file), "r+") as h5:
-        s_raw = np.asarray(h5["raw/S_paths"], dtype=np.float64)
-        w_raw = np.asarray(h5["raw/W_opt"], dtype=np.float64)
+        if "raw/S_paths_full" in h5:
+            s_raw = np.asarray(h5["raw/S_paths_full"], dtype=np.float64)
+        else:
+            s_raw = np.asarray(h5["raw/S_paths"], dtype=np.float64)
+
+        if "raw/W_full" in h5:
+            w_raw = np.asarray(h5["raw/W_full"], dtype=np.float64)
+        else:
+            w_raw = np.asarray(h5["raw/W_opt"], dtype=np.float64)
 
         n_rooms = s_raw.shape[0]
         s_mat = s_raw.reshape(n_rooms, -1)
@@ -868,29 +930,35 @@ def compute_global_svd(h5_path: str | Path, n_components: int = 32) -> None:
         s_coeff, s_mean, s_comp = _svd_project(s_mat, int(n_components))
         w_coeff, w_mean, w_comp = _svd_project(w_mat, int(n_components))
 
+        processed = h5["processed"] if "processed" in h5 else h5.create_group("processed")
+        svd_group = processed["global_svd"] if "global_svd" in processed else processed.create_group("global_svd")
+
+        s_pca_ds = _ensure_dataset(processed, "S_pca_coeffs", (n_rooms, int(n_components)), "f4")
+        w_pca_ds = _ensure_dataset(processed, "W_pca_coeffs", (n_rooms, int(n_components)), "f4")
+        v_w_ds = _ensure_dataset(processed, "V_w", (int(n_components), w_mat.shape[1]), "f4")
+
+        s_mean_ds = _ensure_dataset(svd_group, "S_mean", (s_mat.shape[1],), "f4")
+        w_mean_ds = _ensure_dataset(svd_group, "W_mean", (w_mat.shape[1],), "f4")
+        s_comp_ds = _ensure_dataset(svd_group, "S_components", (int(n_components), s_mat.shape[1]), "f4")
+        w_comp_ds = _ensure_dataset(svd_group, "W_components", (int(n_components), w_mat.shape[1]), "f4")
+
         # 若请求维度大于可用秩，按实际维度写入前段，其余保持 0。
-        h5["processed/S_pca_coeffs"][:] = 0.0
-        h5["processed/W_pca_coeffs"][:] = 0.0
-        h5["processed/S_pca_coeffs"][:, : s_coeff.shape[1]] = s_coeff
-        h5["processed/W_pca_coeffs"][:, : w_coeff.shape[1]] = w_coeff
+        s_pca_ds[:] = 0.0
+        w_pca_ds[:] = 0.0
+        s_pca_ds[:, : s_coeff.shape[1]] = s_coeff
+        w_pca_ds[:, : w_coeff.shape[1]] = w_coeff
 
-        h5["processed/global_svd/S_mean"][:] = s_mean
-        h5["processed/global_svd/W_mean"][:] = w_mean
+        s_mean_ds[:] = s_mean
+        w_mean_ds[:] = w_mean
 
-        h5["processed/global_svd/S_components"][:] = 0.0
-        h5["processed/global_svd/W_components"][:] = 0.0
-        h5["processed/global_svd/S_components"][: s_comp.shape[0], :] = s_comp
-        h5["processed/global_svd/W_components"][: w_comp.shape[0], :] = w_comp
+        s_comp_ds[:] = 0.0
+        w_comp_ds[:] = 0.0
+        s_comp_ds[: s_comp.shape[0], :] = s_comp
+        w_comp_ds[: w_comp.shape[0], :] = w_comp
 
         # 训练端统一使用 /processed/V_w 作为全局物理基底矩阵。
-        if "/processed/V_w" not in h5:
-            h5["processed"].create_dataset(
-                "V_w",
-                shape=(int(n_components), w_mat.shape[1]),
-                dtype="f4",
-            )
-        h5["processed/V_w"][:] = 0.0
-        h5["processed/V_w"][: w_comp.shape[0], :] = w_comp
+        v_w_ds[:] = 0.0
+        v_w_ds[: w_comp.shape[0], :] = w_comp
 
         h5.attrs["svd_components_requested"] = int(n_components)
         h5.attrs["svd_components_effective_s"] = int(s_comp.shape[0])
@@ -936,6 +1004,8 @@ def _print_run_parameters(cfg: DatasetBuildConfig) -> None:
         f"在 [{cfg.warmup_start_s_min:.2f}, {cfg.warmup_start_s_max:.2f}] s 随机起点截取 x_ref "
         "(使用 Python random.uniform)"
     )
+    print("次级通路保存: 对角自通路 + 全交叉矩阵 S_paths_full[sec,err,:]")
+    print("滤波器保存: 兼容对角 W_opt + 全矩阵 W_full[sec,ref,:]")
     print(f"目标样本数: {cfg.target_rooms}")
     print(f"最大尝试数: {cfg.max_total_attempts}")
     print(f"尝试日志间隔: 每 {cfg.attempt_log_interval} 次")
