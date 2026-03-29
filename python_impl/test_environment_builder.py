@@ -66,7 +66,6 @@ if __name__ == "__main__":
         )
 
         if i == 0:
-            preview_path = output_dir / "layout_preview_environment_builder.png"
             fig, _ = plot_layout_with_labels(
                 mgr,
                 source_ids=source_ids,
@@ -74,10 +73,10 @@ if __name__ == "__main__":
                 sec_ids=sec_ids,
                 err_ids=err_ids,
                 title="Environment Builder Layout Preview (Scenario 1)",
-                save_path=str(preview_path),
+                # save_path=str(preview_path),  # 已按需求禁用自动保存图片
             )
             plt.close(fig)
-            print(f"  layout preview saved: {preview_path}")
+            print("  layout preview generated (auto file save disabled)")
 
         all_scenarios.append(scenario_to_dict(scenario))
 

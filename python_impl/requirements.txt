@@ -2,3 +2,4 @@ numpy>=1.24
 scipy>=1.10
 matplotlib>=3.7
 pyroomacoustics>=0.9.0
+h5py>=3.10

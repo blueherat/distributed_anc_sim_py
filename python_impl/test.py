@@ -24,7 +24,6 @@ from py_anc.algorithms.nodes import (
 from py_anc.scenarios import NodeRadialLayout, RoomConfig, ScenarioConfig, build_manager_from_config, plot_layout_with_labels, sample_asymmetric_scenario
 from py_anc.topology import Network
 from py_anc.utils import wn_gen
-from py_anc.viz import plot_results, plot_tap_weights
 
 
 ALGORITHM_MAP = {
@@ -140,20 +139,84 @@ def _compute_nr_db(d: np.ndarray, e: np.ndarray, fs: int, window_seconds: float 
     return [-v for v in nse]
 
 
+def _compute_rolling_nr_curve(
+    time_axis: np.ndarray,
+    d_ch: np.ndarray,
+    e_ch: np.ndarray,
+    fs: int,
+    window_seconds: float = 0.25,
+) -> tuple[np.ndarray, np.ndarray]:
+    t = np.asarray(time_axis, dtype=float).reshape(-1)
+    d_vec = np.asarray(d_ch, dtype=float).reshape(-1)
+    e_vec = np.asarray(e_ch, dtype=float).reshape(-1)
+    if not (t.size == d_vec.size == e_vec.size):
+        raise ValueError("time_axis、d_ch、e_ch 长度必须一致。")
+
+    win = max(8, int(round(window_seconds * fs)))
+    if d_vec.size < win:
+        d_pow = float(np.mean(d_vec**2)) + np.finfo(float).eps
+        e_pow = float(np.mean(e_vec**2)) + np.finfo(float).eps
+        nr_val = float(10.0 * np.log10(d_pow / e_pow))
+        return t, np.full(t.shape, nr_val, dtype=float)
+
+    kernel = np.ones(win, dtype=float) / float(win)
+    d_pow = np.convolve(d_vec**2, kernel, mode="valid")
+    e_pow = np.convolve(e_vec**2, kernel, mode="valid")
+    nr_curve = 10.0 * np.log10((d_pow + np.finfo(float).eps) / (e_pow + np.finfo(float).eps))
+    return t[win - 1 :], nr_curve
+
+
+def _show_nr_curves_for_nodes(
+    time_axis: np.ndarray,
+    d: np.ndarray,
+    all_results: list[dict],
+    selected_algorithms: list[str],
+    err_ids: np.ndarray,
+    fs: int,
+) -> None:
+    n_nodes = d.shape[1]
+    n_cols = 2
+    n_rows = int(np.ceil(n_nodes / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 3.8 * n_rows), constrained_layout=True, sharex=True)
+    axes = np.atleast_1d(axes).reshape(-1)
+
+    colors = plt.cm.tab10(np.linspace(0, 1, max(1, len(selected_algorithms))))
+    t_vec = np.asarray(time_axis, dtype=float).reshape(-1)
+
+    for ch in range(n_nodes):
+        ax = axes[ch]
+        for idx, alg_name in enumerate(selected_algorithms):
+            e_sig = np.asarray(all_results[idx]["err_hist"][:, ch], dtype=float)
+            t_nr, nr_curve = _compute_rolling_nr_curve(t_vec, d[:, ch], e_sig, fs)
+            ax.plot(t_nr, nr_curve, color=colors[idx], linewidth=1.4, label=alg_name)
+
+        ax.set_title(f"节点 {ch + 1} (Err Mic {int(err_ids[ch])})")
+        ax.set_xlabel("时间 (s)")
+        ax.set_ylabel("NR (dB)")
+        ax.grid(True, alpha=0.3)
+        if ch == 0:
+            ax.legend(loc="best")
+
+    for ch in range(n_nodes, axes.size):
+        axes[ch].set_visible(False)
+
+    fig.suptitle("四节点降噪曲线（滚动窗口）")
+    plt.show()
+
+
 if __name__ == "__main__":
     # =========================
     # User configuration block
     # =========================
     selected_algorithms = ["CFxLMS"]
 
-    duration_s = 10.0
+    duration_s = 7
     f_low = 100.0
     f_high = 1500.0
-    filter_length = 1024
+    filter_length = 512
     mu = 1e-4
     random_seed = 42
 
-    save_plots = True
     output_dir = ROOT_DIR / "python_scripts"
 
     use_random_scenario = False
@@ -184,7 +247,6 @@ if __name__ == "__main__":
     print("Building room impulse responses...")
     mgr.build(verbose=False)
 
-    layout_png = output_dir / "layout_preview_test.png"
     fig_layout, _ = plot_layout_with_labels(
         mgr,
         source_ids=source_ids,
@@ -192,10 +254,10 @@ if __name__ == "__main__":
         sec_ids=sec_ids,
         err_ids=err_ids,
         title="Test Scenario Layout",
-        save_path=str(layout_png),
+        # save_path=str(layout_png),  # 已按需求禁用自动保存图片
     )
     plt.close(fig_layout)
-    print(f"Layout preview saved to: {layout_png}")
+    print("Layout preview generated (auto file save disabled).")
 
     # Generate one source channel per primary source.
     source_columns = []
@@ -243,17 +305,9 @@ if __name__ == "__main__":
         print(f"{alg_name} runtime: {dt:.6f} s")
         print(f"{alg_name} mean NR(d/e) over last 1s: {float(np.mean(nr_db_last_1s[alg_name])):.4f} dB")
 
-    # Optional diagnostic plots.
-    if save_plots and all_results:
-        tap_fig = plot_tap_weights([r["filter_coeffs"] for r in all_results], selected_algorithms, list(sec_ids))
-        tap_fig.savefig(output_dir / "tap_weights_test.png", dpi=140, bbox_inches="tight")
-        plt.close(tap_fig)
-
-        for ch, err_id in enumerate(err_ids):
-            err_signals_ch = [r["err_hist"][:, ch] for r in all_results]
-            fig = plot_results(time_axis[:, 0], d[:, ch], err_signals_ch, selected_algorithms, int(err_id), float(mgr.fs))
-            fig.savefig(output_dir / f"error_compare_mic_{int(err_id)}.png", dpi=140, bbox_inches="tight")
-            plt.close(fig)
+    # 仅显示四节点降噪曲线，不保存图片文件。
+    if all_results:
+        _show_nr_curves_for_nodes(time_axis[:, 0], d, all_results, selected_algorithms, err_ids, int(mgr.fs))
 
     summary = {
         "algorithms": selected_algorithms,
@@ -266,7 +320,7 @@ if __name__ == "__main__":
         "runtimes_s": runtimes,
         "nse_db_last_1s": nse_db_last_1s,
         "nr_db_last_1s": nr_db_last_1s,
-        "layout_preview": str(layout_png),
+        "layout_preview": "",
     }
 
     summary_path = output_dir / "last_run_summary_from_test.json"

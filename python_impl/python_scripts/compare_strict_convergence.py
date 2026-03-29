@@ -59,6 +59,7 @@ def main() -> None:
     parser.add_argument("--report-out", type=str, default=str(DEFAULT_REPORT))
     parser.add_argument("--overlay-png", type=str, default=str(DEFAULT_OVERLAY_PNG))
     parser.add_argument("--delta-png", type=str, default=str(DEFAULT_DELTA_PNG))
+    parser.add_argument("--save-plots", action="store_true", help="是否保存图像文件。默认不保存。")
     args = parser.parse_args()
 
     py_summary_path = _resolve(args.py_summary)
@@ -172,8 +173,12 @@ def main() -> None:
     axes[min(n_alg - 1, len(axes) - 1)].set_xlabel("Time (s)")
     fig.suptitle("Strict Equivalence: Convergence Overlay (NR)")
     fig.tight_layout()
-    overlay_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(overlay_png, dpi=150, bbox_inches="tight")
+    if args.save_plots:
+        overlay_png.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(overlay_png, dpi=150, bbox_inches="tight")
+    else:
+        # fig.savefig(overlay_png, dpi=150, bbox_inches="tight")  # 已按需求禁用自动保存图片
+        pass
     plt.close(fig)
 
     # Delta figure (Python - MATLAB).
@@ -187,27 +192,35 @@ def main() -> None:
     ax2.grid(True, alpha=0.3)
     ax2.legend(loc="best", ncol=2)
     fig2.tight_layout()
-    delta_png.parent.mkdir(parents=True, exist_ok=True)
-    fig2.savefig(delta_png, dpi=150, bbox_inches="tight")
+    if args.save_plots:
+        delta_png.parent.mkdir(parents=True, exist_ok=True)
+        fig2.savefig(delta_png, dpi=150, bbox_inches="tight")
+    else:
+        # fig2.savefig(delta_png, dpi=150, bbox_inches="tight")  # 已按需求禁用自动保存图片
+        pass
     plt.close(fig2)
 
     report = {
         "rows": rows,
         "curve_points": int(n_common),
-        "overlay_png": str(overlay_png),
-        "delta_png": str(delta_png),
+        "overlay_png": str(overlay_png) if args.save_plots else "",
+        "delta_png": str(delta_png) if args.save_plots else "",
         "py_summary": str(py_summary_path),
         "mat_summary": str(mat_summary_path),
         "py_curves": str(py_curves_path),
         "mat_curves": str(mat_curves_path),
+        "plot_saving_enabled": bool(args.save_plots),
     }
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print(f"Strict convergence report saved to: {report_path}")
-    print(f"Overlay figure saved to: {overlay_png}")
-    print(f"Delta figure saved to: {delta_png}")
+    if args.save_plots:
+        print(f"Overlay figure saved to: {overlay_png}")
+        print(f"Delta figure saved to: {delta_png}")
+    else:
+        print("Plot auto save is disabled. Use --save-plots to enable image export.")
 
 
 if __name__ == "__main__":
