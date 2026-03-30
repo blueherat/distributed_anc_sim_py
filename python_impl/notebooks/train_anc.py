@@ -1,18 +1,5 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Auto-generated script from `python_impl/notebooks/train_anc.ipynb`.
-Keep this file and the notebook in sync using:
-
-    python python_impl/tools/notebook_script_sync.py --nb2py
-    python python_impl/tools/notebook_script_sync.py --py2nb
-
-By default this script will not start full training automatically.
-Use `--train` to run the training loop.
-"""
-
 # %% [markdown]
-# 训练 Notebook：物理条件注入的 MIMO-ANC 生成网络（train_anc.ipynb）
+# # 训练 Notebook：物理条件注入的 MIMO-ANC 生成网络（train_anc.ipynb）
 #
 # 本 Notebook 实现：
 # - 从 HDF5 (`processed/*`) 加载特征与标签（gcc_phat / psd_features / S_pca_coeffs / W_pca_coeffs），
@@ -32,9 +19,7 @@ import os
 import time
 import random
 from pathlib import Path
-import argparse
 
-import json
 import numpy as np
 import h5py
 import torch
@@ -74,6 +59,51 @@ if device.type == 'cuda':
 H5_PATH = Path('python_impl') / 'python_scripts' / 'cfxlms_qc_dataset_cross_500_seeded.h5'
 assert H5_PATH.exists(), f'数据集文件不存在: {H5_PATH}'
 print('HDF5 dataset:', H5_PATH)
+CHECKPOINT_PATH = Path('best_mimo_anc_net_500room_200epoch.pth')
+FINAL_CHECKPOINT_PATH = Path('final_mimo_anc_net_500room_200epoch.pth')
+
+
+def _standardize_array(x: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
+    return ((x - mean) / std).astype(np.float32)
+
+
+def _destandardize_tensor(x: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+    return x * std + mean
+
+
+def _move_norm_stats_to_device(norm_stats):
+    out = {}
+    for key, value in norm_stats.items():
+        out[key] = {
+            'mean': torch.as_tensor(value['mean'], dtype=torch.float32, device=device),
+            'std': torch.as_tensor(value['std'], dtype=torch.float32, device=device),
+        }
+    return out
+
+
+def _cpu_state_dict(module: nn.Module):
+    return {k: v.detach().cpu() for k, v in module.state_dict().items()}
+
+
+def compute_normalization_stats(dataset, train_indices, eps=1.0e-6):
+    idx = np.asarray(train_indices, dtype=np.int64)
+    gcc = np.asarray(dataset.h5['processed/gcc_phat'][idx], dtype=np.float32)
+    psd = np.asarray(dataset.h5['processed/psd_features'][idx], dtype=np.float32)
+    x_p = np.concatenate([gcc, psd[:, None, :]], axis=1).astype(np.float32)
+    x_s = np.asarray(dataset.h5['processed/S_pca_coeffs'][idx], dtype=np.float32)
+    y_c = np.asarray(dataset.h5['processed/W_pca_coeffs'][idx], dtype=np.float32)
+
+    def _stats(arr):
+        mean = arr.mean(axis=0, dtype=np.float64).astype(np.float32)
+        std = arr.std(axis=0, dtype=np.float64).astype(np.float32)
+        std = np.maximum(std, np.float32(eps))
+        return {'mean': mean, 'std': std}
+
+    return {
+        'x_p': _stats(x_p),
+        'x_s': _stats(x_s),
+        'y_c': _stats(y_c),
+    }
 
 # %%
 class HDF5ANCConditionedDataset(Dataset):
@@ -82,9 +112,9 @@ class HDF5ANCConditionedDataset(Dataset):
 
     Reads per-sample:
       - processed/gcc_phat  -> (3,129)  (空间相关特征)
-      - processed/psd_features -> (129,)   (频谱特征, 在 __getitem__ 中 reshape 为 (1,129))
-      - processed/S_pca_coeffs -> (32,)   (物理条件系数 x_s)
-      - processed/W_pca_coeffs -> (32,)   (标签 c_true)
+    - processed/psd_features -> (129,)   (频谱特征, 在 __getitem__ 中 reshape 为 (1,129))
+    - processed/S_pca_coeffs -> (32,)   (物理条件系数 x_s)
+    - processed/W_pca_coeffs -> (32,)   (标签 c_true)
 
     Additionally, during initialization this class loads global SVD basis:
       - processed/global_svd/W_components  (32, 4608)
@@ -99,14 +129,23 @@ class HDF5ANCConditionedDataset(Dataset):
 
         # 样本数（按 processed/gcc_phat 的第一维推断）
         self.n_samples = int(self.h5['processed/gcc_phat'].shape[0])
-        self.device = device
+        self.norm_stats = None
 
         # 加载全局 W 基底并转为 GPU Tensor（用于损失计算）
         W_comp = np.asarray(self.h5['processed/global_svd/W_components'], dtype=np.float32)
         W_mean = np.asarray(self.h5['processed/global_svd/W_mean'], dtype=np.float32)
         # 用户要求：把它们置于 GPU（若可用）以便训练中直接使用
-        self.W_components = torch.from_numpy(W_comp).to(self.device)  # shape (32, 4608)
-        self.W_mean = torch.from_numpy(W_mean).to(self.device)     # shape (4608,)
+        self.W_components = torch.from_numpy(W_comp)  # shape (32, 4608)
+        self.W_mean = torch.from_numpy(W_mean)  # shape (4608,)
+
+    def set_normalization_stats(self, norm_stats):
+        self.norm_stats = {
+            key: {
+                'mean': np.asarray(value['mean'], dtype=np.float32),
+                'std': np.asarray(value['std'], dtype=np.float32),
+            }
+            for key, value in norm_stats.items()
+        }
 
     def __len__(self):
         return self.n_samples
@@ -123,6 +162,11 @@ class HDF5ANCConditionedDataset(Dataset):
         x_s = np.asarray(self.h5['processed/S_pca_coeffs'][idx], dtype=np.float32)  # (32,)
         y_c = np.asarray(self.h5['processed/W_pca_coeffs'][idx], dtype=np.float32)  # (32,)
 
+        if self.norm_stats is not None:
+            x_p = _standardize_array(x_p, self.norm_stats['x_p']['mean'], self.norm_stats['x_p']['std'])
+            x_s = _standardize_array(x_s, self.norm_stats['x_s']['mean'], self.norm_stats['x_s']['std'])
+            y_c = _standardize_array(y_c, self.norm_stats['y_c']['mean'], self.norm_stats['y_c']['std'])
+
         # 返回 CPU 张量（训练循环中再移动到 device），以避免 DataLoader worker 的 GPU 句柄复制问题
         x_p_t = torch.from_numpy(x_p)  # shape (4,129)
         x_s_t = torch.from_numpy(x_s)  # shape (32,)
@@ -130,8 +174,15 @@ class HDF5ANCConditionedDataset(Dataset):
 
         return x_p_t, x_s_t, y_c_t
 
-# %%
+    def close(self):
+        if getattr(self, 'h5', None) is not None:
+            self.h5.close()
+            self.h5 = None
 
+    def __del__(self):
+        self.close()
+
+# %%
 def get_dataloaders(h5_path, batch_size=64, val_frac=0.2, device=device, shuffle_seed=20260329):
     # 构造完整 dataset 并按 8:2 划分 train/val（使用 Subset）
     full_ds = HDF5ANCConditionedDataset(h5_path, device=device)
@@ -143,15 +194,23 @@ def get_dataloaders(h5_path, batch_size=64, val_frac=0.2, device=device, shuffle
     train_idx = indices[:split]
     val_idx = indices[split:]
 
+    norm_stats = compute_normalization_stats(full_ds, train_idx)
+    full_ds.set_normalization_stats(norm_stats)
+
     train_ds = Subset(full_ds, train_idx)
     val_ds = Subset(full_ds, val_idx)
 
     # 为避免 DataLoader 在 worker 中复制 GPU 句柄，使用 num_workers=0；如需加速可酌情增加并改进 W_components 读取策略
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
-    return full_ds, train_loader, val_loader
+    pin_memory = device.type == 'cuda'
+    generator = torch.Generator()
+    generator.manual_seed(shuffle_seed)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=pin_memory, generator=generator)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=pin_memory)
+    split_info = {'train_indices': train_idx, 'val_indices': val_idx, 'norm_stats': norm_stats}
+    return full_ds, train_loader, val_loader, split_info
 
 # %%
+# 可能还是需要加入attention，否则信息不完全，时间结构无法表现出来
 class MIMO_Conditioned_ANCNet(nn.Module):
     """
     双分支网络：
@@ -228,7 +287,6 @@ class MIMO_Conditioned_ANCNet(nn.Module):
 
 # %%
 # 简单工具：将展平向量 (B,4608) reshape 回 (sec, ref, L) -> (3,3,512) 以便可视化/检验
-
 def unflatten_W(W_flat, sec=3, ref=3, L=512):
     # W_flat: numpy or torch tensor of shape (..., 4608)
     shape = list(W_flat.shape)
@@ -241,148 +299,172 @@ def unflatten_W(W_flat, sec=3, ref=3, L=512):
         return W_flat.reshape(*new_shape)
 
 # 构建 DataLoaders 并打印基本信息
-full_ds, train_loader, val_loader = get_dataloaders(H5_PATH, batch_size=16, val_frac=0.2, device=device)
+full_ds, train_loader, val_loader, split_info = get_dataloaders(H5_PATH, batch_size=16, val_frac=0.2, device=device)
 print('dataset samples:', len(full_ds))
 print('train batches:', len(train_loader), 'val batches:', len(val_loader))
 print('W_components shape:', full_ds.W_components.shape, 'W_mean shape:', full_ds.W_mean.shape)
 # 快速查看第一个样本形状
 x_p0, x_s0, y_c0 = full_ds[0]
 print('sample x_p shape:', x_p0.shape, 'x_s shape:', x_s0.shape, 'y_c shape:', y_c0.shape)
+print('train split:', len(split_info['train_indices']), 'val split:', len(split_info['val_indices']))
 
 # %%
+# 训练循环（含物理重构损失与动态可视化）
+model = MIMO_Conditioned_ANCNet().to(device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
+epochs = 200
+best_val = float('inf')
+train_hist = []
+val_hist = []
 
-def train(epochs=50, train_loader=None, val_loader=None, device=device):
-    model = MIMO_Conditioned_ANCNet().to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5, verbose=True)
-    best_val = float('inf')
-    train_hist = []
-    val_hist = []
+# 为方便访问，把 W 基底从 dataset 拿出来（已在 GPU 上）
+W_components = full_ds.W_components.to(device=device, dtype=torch.float32)
+W_mean = full_ds.W_mean.to(device=device, dtype=torch.float32)
+norm_stats_t = _move_norm_stats_to_device(split_info['norm_stats'])
+y_mean_t = norm_stats_t['y_c']['mean']
+y_std_t = norm_stats_t['y_c']['std']
 
-    # 为方便访问，把 W 基底从 dataset 拿出来（已在 GPU 上）
-    W_components = full_ds.W_components  # shape (32, 4608), device
-    W_mean = full_ds.W_mean            # shape (4608,), device
+for epoch in range(1, epochs + 1):
+    model.train()
+    t0 = time.time()
+    running_loss = 0.0
+    n_batches = 0
+    for xb_p, xb_s, yb_c in train_loader:
+        # xb_p: [B,4,129] (CPU tensor), xb_s: [B,32], yb_c: [B,32]
+        xb_p = xb_p.to(device=device, dtype=torch.float32, non_blocking=(device.type == 'cuda'))
+        xb_s = xb_s.to(device=device, dtype=torch.float32, non_blocking=(device.type == 'cuda'))
+        yb_c = yb_c.to(device=device, dtype=torch.float32, non_blocking=(device.type == 'cuda'))
 
-    for epoch in range(1, epochs + 1):
-        model.train()
-        t0 = time.time()
-        running_loss = 0.0
-        n_batches = 0
-        for xb_p, xb_s, yb_c in train_loader:
-            xb_p = xb_p.to(device=device, dtype=torch.float32)
-            xb_s = xb_s.to(device=device, dtype=torch.float32)
-            yb_c = yb_c.to(device=device, dtype=torch.float32)
+        optimizer.zero_grad(set_to_none=True)
+        c_pred = model(xb_p, xb_s)  # [B,32]
+        loss_c = F.mse_loss(c_pred, yb_c)
 
-            optimizer.zero_grad()
-            c_pred = model(xb_p, xb_s)  # [B,32]
-            loss_c = F.mse_loss(c_pred, yb_c)
+        # 物理解码：c @ W_components + W_mean -> [B,4608]
+        c_pred_denorm = _destandardize_tensor(c_pred, y_mean_t, y_std_t)
+        yb_c_denorm = _destandardize_tensor(yb_c, y_mean_t, y_std_t)
+        W_pred_flat = torch.matmul(c_pred_denorm, W_components) + W_mean
+        W_true_flat = torch.matmul(yb_c_denorm, W_components) + W_mean
+        loss_w = F.mse_loss(W_pred_flat, W_true_flat)
 
-            # 物理解码：c @ W_components + W_mean -> [B,4608]
-            W_pred_flat = torch.matmul(c_pred, W_components) + W_mean
-            W_true_flat = torch.matmul(yb_c, W_components) + W_mean
-            loss_w = F.mse_loss(W_pred_flat, W_true_flat)
+        loss = loss_c + 0.1 * loss_w
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+        optimizer.step()
 
-            loss = loss_c + 0.1 * loss_w
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            optimizer.step()
+        running_loss += float(loss.item())
+        n_batches += 1
 
-            running_loss += float(loss.item())
-            n_batches += 1
+    train_loss = running_loss / max(1, n_batches)
 
-        train_loss = running_loss / max(1, n_batches)
-
-        # 验证集评估
-        model.eval()
-        val_running = 0.0
-        val_batches = 0
-        with torch.no_grad():
-            for xb_p, xb_s, yb_c in val_loader:
-                xb_p = xb_p.to(device=device, dtype=torch.float32)
-                xb_s = xb_s.to(device=device, dtype=torch.float32)
-                yb_c = yb_c.to(device=device, dtype=torch.float32)
-
-                c_pred = model(xb_p, xb_s)
-                loss_c = F.mse_loss(c_pred, yb_c)
-                W_pred_flat = torch.matmul(c_pred, W_components) + W_mean
-                W_true_flat = torch.matmul(yb_c, W_components) + W_mean
-                loss_w = F.mse_loss(W_pred_flat, W_true_flat)
-                loss = loss_c + 0.1 * loss_w
-                val_running += float(loss.item())
-                val_batches += 1
-        val_loss = val_running / max(1, val_batches)
-
-        train_hist.append(train_loss)
-        val_hist.append(val_loss)
-
-        # 调度器根据验证集 loss 调整学习率
-        scheduler.step(val_loss)
-
-        # 动态可视化（清屏+绘图）
-        clear_output(wait=True)
-        plt.figure(figsize=(8,5))
-        plt.plot(train_hist, label='Train Loss')
-        plt.plot(val_hist, label='Val Loss')
-        plt.yscale('log')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss (log)')
-        plt.title(f'Epoch {epoch}  Train {train_loss:.4e}  Val {val_loss:.4e}')
-        plt.grid(True, which='both', ls='--', alpha=0.4)
-        plt.legend()
-        plt.show()
-
-        # 保存最佳模型
-        nonlocal_best = False
-        if val_loss < best_val:
-            best_val = val_loss
-            torch.save(model.state_dict(), 'best_mimo_anc_net.pth')
-            print(f'>>> Saved best model at epoch {epoch}, val_loss={val_loss:.6e}')
-            nonlocal_best = True
-
-        # 简要日志
-        elapsed = time.time() - t0
-        print(f'Epoch {epoch}/{epochs}  train_loss={train_loss:.6e}  val_loss={val_loss:.6e}  time={elapsed:.1f}s')
-
-    # 训练结束后，最后再保存一次（可选）
-    torch.save(model.state_dict(), 'final_mimo_anc_net.pth')
-    print('Training complete. Best val loss:', best_val)
-
-# %%
-
-def evaluate_example():
-    m = MIMO_Conditioned_ANCNet().to(device)
-    m.load_state_dict(torch.load('best_mimo_anc_net.pth', map_location=device))
-    m.eval()
+    # 验证集评估
+    model.eval()
+    val_running = 0.0
+    val_batches = 0
     with torch.no_grad():
         for xb_p, xb_s, yb_c in val_loader:
-            xb_p = xb_p.to(device=device, dtype=torch.float32)
-            xb_s = xb_s.to(device=device, dtype=torch.float32)
-            yb_c = yb_c.to(device=device, dtype=torch.float32)
-            c_pred = m(xb_p, xb_s)
-            W_pred_flat = torch.matmul(c_pred, full_ds.W_components) + full_ds.W_mean
-            W_true_flat = torch.matmul(yb_c, full_ds.W_components) + full_ds.W_mean
-            # 计算一些统计量
-            mse_flat = F.mse_loss(W_pred_flat, W_true_flat).item()
-            print('Example batch reconstruction MSE (flat):', mse_flat)
-            # 将第一个样本 reshape 为 (3,3,512) 并打印能量统计
-            W0 = W_pred_flat[0].cpu().numpy().reshape(3,3,512)
-            print('W0 shape (sec,ref,L):', W0.shape, 'norm:', np.linalg.norm(W0))
-            break
+            xb_p = xb_p.to(device=device, dtype=torch.float32, non_blocking=(device.type == 'cuda'))
+            xb_s = xb_s.to(device=device, dtype=torch.float32, non_blocking=(device.type == 'cuda'))
+            yb_c = yb_c.to(device=device, dtype=torch.float32, non_blocking=(device.type == 'cuda'))
+
+            c_pred = model(xb_p, xb_s)
+            loss_c = F.mse_loss(c_pred, yb_c)
+            c_pred_denorm = _destandardize_tensor(c_pred, y_mean_t, y_std_t)
+            yb_c_denorm = _destandardize_tensor(yb_c, y_mean_t, y_std_t)
+            W_pred_flat = torch.matmul(c_pred_denorm, W_components) + W_mean
+            W_true_flat = torch.matmul(yb_c_denorm, W_components) + W_mean
+            loss_w = F.mse_loss(W_pred_flat, W_true_flat)
+            loss = loss_c + 0.1 * loss_w
+            val_running += float(loss.item())
+            val_batches += 1
+    val_loss = val_running / max(1, val_batches)
+
+    train_hist.append(train_loss)
+    val_hist.append(val_loss)
+
+    # 调度器根据验证集 loss 调整学习率
+    scheduler.step(val_loss)
+
+    # 动态可视化（清屏+绘图）
+    clear_output(wait=True)
+    fig = plt.figure(figsize=(8,5))
+    plt.plot(train_hist, label='Train Loss')
+    plt.plot(val_hist, label='Val Loss')
+    plt.yscale('log')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss (log)')
+    plt.title(f'Epoch {epoch}  Train {train_loss:.4e}  Val {val_loss:.4e}')
+    plt.grid(True, which='both', ls='--', alpha=0.4)
+    plt.legend()
+    plt.show()
+    plt.close(fig)
+
+    # 保存最佳模型
+    if val_loss < best_val:
+        best_val = val_loss
+        checkpoint = {
+            'model_state_dict': _cpu_state_dict(model),
+            'norm_stats': split_info['norm_stats'],
+            'train_indices': np.asarray(split_info['train_indices'], dtype=np.int32),
+            'val_indices': np.asarray(split_info['val_indices'], dtype=np.int32),
+            'seed': int(seed),
+            'h5_path': str(H5_PATH),
+        }
+        torch.save(checkpoint, CHECKPOINT_PATH)
+        print(f'>>> Saved best checkpoint at epoch {epoch}, val_loss={val_loss:.6e}')
+    
+    # 简要日志
+    elapsed = time.time() - t0
+    print(f'Epoch {epoch}/{epochs}  train_loss={train_loss:.6e}  val_loss={val_loss:.6e}  time={elapsed:.1f}s')
+
+# 训练结束后，最后再保存一次（可选）
+final_checkpoint = {
+    'model_state_dict': _cpu_state_dict(model),
+    'norm_stats': split_info['norm_stats'],
+    'train_indices': np.asarray(split_info['train_indices'], dtype=np.int32),
+    'val_indices': np.asarray(split_info['val_indices'], dtype=np.int32),
+    'seed': int(seed),
+    'h5_path': str(H5_PATH),
+}
+torch.save(final_checkpoint, FINAL_CHECKPOINT_PATH)
+print('Training complete. Best val loss:', best_val)
 
 # %%
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--train', action='store_true', help='Run training loop')
-    parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch-size', type=int, default=16)
-    parser.add_argument('--eval', action='store_true', help='Run example evaluation using best model')
-    args = parser.parse_args()
+# 推理示例：载入 best 模型并对验证集首个 batch 输出重构统计信息
+m = MIMO_Conditioned_ANCNet().to(device)
+checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+state_dict = checkpoint['model_state_dict'] if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint else checkpoint
+norm_stats_eval = checkpoint.get('norm_stats', split_info['norm_stats']) if isinstance(checkpoint, dict) else split_info['norm_stats']
+norm_stats_eval_t = _move_norm_stats_to_device(norm_stats_eval)
+m.load_state_dict(state_dict)
+m.eval()
+with torch.no_grad():
+    for xb_p, xb_s, yb_c in val_loader:
+        xb_p = xb_p.to(device=device, dtype=torch.float32)
+        xb_s = xb_s.to(device=device, dtype=torch.float32)
+        yb_c = yb_c.to(device=device, dtype=torch.float32)
+        c_pred = m(xb_p, xb_s)
+        c_pred_denorm = _destandardize_tensor(c_pred, norm_stats_eval_t['y_c']['mean'], norm_stats_eval_t['y_c']['std'])
+        yb_c_denorm = _destandardize_tensor(yb_c, norm_stats_eval_t['y_c']['mean'], norm_stats_eval_t['y_c']['std'])
+        W_pred_flat = torch.matmul(c_pred_denorm, W_components) + W_mean
+        W_true_flat = torch.matmul(yb_c_denorm, W_components) + W_mean
+        # 计算一些统计量
+        mse_flat = F.mse_loss(W_pred_flat, W_true_flat).item()
+        print('Example batch reconstruction MSE (flat):', mse_flat)
+        # 将第一个样本 reshape 为 (3,3,512) 并打印能量统计
+        W0 = W_pred_flat[0].cpu().numpy().reshape(3,3,512)
+        print('W0 shape (sec,ref,L):', W0.shape, 'norm:', np.linalg.norm(W0))
+        break
 
-    if args.train:
-        # rebuild dataloaders with requested batch size
-        full_ds, train_loader, val_loader = get_dataloaders(H5_PATH, batch_size=args.batch_size, val_frac=0.2, device=device)
-        train(epochs=args.epochs, train_loader=train_loader, val_loader=val_loader, device=device)
-    elif args.eval:
-        evaluate_example()
-    else:
-        print('No action requested. Use --train to run training or --eval to run evaluation.')
+# %% [markdown]
+# **说明与使用建议：**
+# - 本 Notebook 假设 DataLoader 使用 `num_workers=0`（以避免在 worker 进程中复制 GPU 张量）。若需加速，可将 `W_components`/`W_mean` 以共享内存或单独进程加载，然后在训练循环中将其转到设备。
+# - 若训练在 GPU 上发生 OOM，可通过减小 `batch_size` 或把 `W_components` 保留在 CPU 并在每个 batch 前移动到 GPU（trade-off）。
+# - 为了可重复性，请确保在运行前固定随机种子（已在顶部设置）。
+#
+# 需要我现在在这个环境里运行 Notebook 的训练吗？（注意：完整训练 100 epochs 需要较长时间和 GPU 资源）
+# %% [markdown]
+# **2026-03-30 修正说明**
+# - 新增了基于训练划分的标准化：`x_p`、`x_s`、`y_c` 都只用 train split 的均值和标准差做 z-score，避免验证集泄漏，也减少网络退化成“总是输出平均值”的风险。
+# - 物理重构损失现在先把预测的 `y_c` 反标准化，再与 `W_components` / `W_mean` 重构 `W`，保证系数损失和波形损失在一致的物理尺度上比较。
+# - `W_components` / `W_mean` 不再在 Dataset 初始化时直接放上 GPU；训练循环改成 `zero_grad(set_to_none=True)`，绘图后显式 `plt.close(...)`，并把 `norm_stats`、train/val 索引和模型权重一起保存到 checkpoint，供评估 notebook 直接复用。

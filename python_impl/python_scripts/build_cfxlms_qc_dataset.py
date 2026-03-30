@@ -45,27 +45,42 @@ class DatasetBuildConfig:
     room_size_min: float = 3.0
     room_size_max: float = 6.0
     wall_margin: float = 0.25
+    source_wall_margin: float = 0.45
 
     sound_speed_min: float = 338.0
     sound_speed_max: float = 346.0
-    absorption_min: float = 0.72
-    absorption_max: float = 0.95
+    absorption_min: float = 0.30
+    absorption_max: float = 0.88
     image_order_choices: tuple[int, ...] = (0, 1, 2)
-    image_order_probs: tuple[float, ...] = (0.60, 0.30, 0.10)
+    image_order_probs: tuple[float, ...] = (0.20, 0.60, 0.20)
+    reflection_room_probability: float = 0.55
+    direct_room_absorption_range: tuple[float, float] = (0.68, 0.88)
+    direct_room_image_order_choices: tuple[int, ...] = (0, 1)
+    direct_room_image_order_probs: tuple[float, ...] = (0.25, 0.75)
+    reflection_room_absorption_range: tuple[float, float] = (0.30, 0.58)
+    reflection_room_image_order_choices: tuple[int, ...] = (1, 2)
+    reflection_room_image_order_probs: tuple[float, ...] = (0.80, 0.20)
 
     num_nodes: int = 3
     min_secondary_node_distance: float = 0.25
     min_device_distance: float = 0.10
+    min_source_device_distance: float = 0.25
     neighbor_causality_tolerance: float = 0.0
     max_causality_violations: int = 0
 
+    layout_mode_choices: tuple[str, ...] = ("source_radial", "wall_strip", "corner_cluster", "free_scatter")
+    layout_mode_probs: tuple[float, ...] = (0.05, 0.35, 0.30, 0.30)
     azimuth_spacing_base: tuple[float, ...] = (0.0, 120.0, 240.0)
-    azimuth_spacing_jitter: float = 6.0
+    azimuth_spacing_jitter: float = 22.0
 
-    ref_radius_range: tuple[float, float] = (0.32, 0.42)
-    sec_delta_range: tuple[float, float] = (0.22, 0.32)
-    err_delta_range: tuple[float, float] = (0.22, 0.32)
-    z_offset_range: tuple[float, float] = (-0.04, 0.04)
+    ref_radius_range: tuple[float, float] = (0.35, 0.55)
+    sec_delta_range: tuple[float, float] = (0.18, 0.38)
+    err_delta_range: tuple[float, float] = (0.18, 0.55)
+    z_offset_range: tuple[float, float] = (-0.10, 0.10)
+    node_ref_to_sec_range: tuple[float, float] = (0.10, 0.32)
+    node_err_extra_range: tuple[float, float] = (0.10, 0.45)
+    secondary_height_range: tuple[float, float] = (0.95, 1.75)
+    node_direction_tilt_range: tuple[float, float] = (-0.10, 0.10)
 
     mu_candidates: tuple[float, ...] = (1.0e-4,)
     min_nr_last_db: float = 1.0
@@ -84,6 +99,8 @@ class DatasetBuildConfig:
     random_seed: int = 20260329
     progress_interval: int = 20
     attempt_log_interval: int = 10
+    layout_preview: bool = True
+    layout_preview_interval: int = 1
 
     output_h5: str = str(ROOT_DIR / "python_scripts" / "cfxlms_qc_dataset.h5")
 
@@ -193,6 +210,126 @@ class FeatureProcessor:
         return psd.astype(np.float32)
 
 
+class LayoutPreviewer:
+    """实时布局预览器：复用同一窗口，不保存图片。"""
+
+    def __init__(self, cfg: DatasetBuildConfig):
+        self.cfg = cfg
+        self.enabled = bool(cfg.layout_preview)
+        self.plt = None
+        self.fig = None
+        self.ax = None
+
+        if not self.enabled:
+            return
+
+        try:
+            import matplotlib.pyplot as plt
+        except Exception as exc:
+            print(f"[Preview] layout preview disabled: {type(exc).__name__}: {exc}")
+            self.enabled = False
+            return
+
+        self.plt = plt
+        try:
+            self.plt.ion()
+            self.fig, self.ax = self.plt.subplots(figsize=(9, 6))
+            manager = getattr(self.fig.canvas, "manager", None)
+            if manager is not None and hasattr(manager, "set_window_title"):
+                manager.set_window_title("CFxLMS Layout Preview")
+            self.plt.show(block=False)
+        except Exception as exc:
+            print(f"[Preview] layout preview disabled during initialization: {type(exc).__name__}: {exc}")
+            self.enabled = False
+            self.plt = None
+            self.fig = None
+            self.ax = None
+
+    def _annotate_devices(self, mgr: RIRManager) -> None:
+        groups = (
+            ("P", mgr.primary_speakers, "darkred"),
+            ("R", mgr.reference_microphones, "purple"),
+            ("S", mgr.secondary_speakers, "darkgreen"),
+            ("E", mgr.error_microphones, "navy"),
+        )
+        for prefix, table, color in groups:
+            for did, pos in table.items():
+                xy = np.asarray(pos, dtype=float)
+                self.ax.text(xy[0], xy[1], f"{prefix}{int(did)}", color=color, fontsize=8)
+
+    def _draw_node_links(self, sampled: dict[str, Any]) -> None:
+        ref_positions = np.asarray(sampled["ref_positions"], dtype=float)
+        sec_positions = np.asarray(sampled["sec_positions"], dtype=float)
+        err_positions = np.asarray(sampled["err_positions"], dtype=float)
+
+        for idx in range(min(len(ref_positions), len(sec_positions), len(err_positions))):
+            color = f"C{idx}"
+            self.ax.plot(
+                [ref_positions[idx, 0], sec_positions[idx, 0], err_positions[idx, 0]],
+                [ref_positions[idx, 1], sec_positions[idx, 1], err_positions[idx, 1]],
+                color=color,
+                alpha=0.45,
+                linewidth=1.3,
+            )
+
+    def update(self, mgr: RIRManager, sampled: dict[str, Any], accepted: int, attempts: int) -> None:
+        if not self.enabled:
+            return
+        if accepted <= 0:
+            return
+        if accepted % max(int(self.cfg.layout_preview_interval), 1) != 0:
+            return
+        if self.plt is None or self.fig is None or self.ax is None:
+            return
+
+        try:
+            if hasattr(self.plt, "fignum_exists") and not self.plt.fignum_exists(self.fig.number):
+                self.enabled = False
+                return
+
+            self.ax.clear()
+            mgr.plot_layout_2d(ax=self.ax)
+            self._annotate_devices(mgr)
+            self._draw_node_links(sampled)
+
+            source_pos = np.asarray(sampled["source_pos"], dtype=float)
+            sec_positions = np.asarray(sampled["sec_positions"], dtype=float)
+            src_sec_dist = np.linalg.norm(sec_positions - source_pos, axis=1)
+            info_lines = [
+                f"accepted={accepted}/{self.cfg.target_rooms}",
+                f"attempt={attempts}",
+                f"layout={sampled.get('layout_mode', '-')}",
+                f"src-sec range={float(np.min(src_sec_dist)):.2f}-{float(np.max(src_sec_dist)):.2f} m",
+                f"abs={float(sampled['absorption']):.2f}, order={int(sampled['image_order'])}",
+            ]
+            self.ax.text(
+                1.02,
+                0.98,
+                "\n".join(info_lines),
+                transform=self.ax.transAxes,
+                va="top",
+                ha="left",
+                fontsize=9,
+                bbox={"boxstyle": "round", "fc": "white", "ec": "0.7", "alpha": 0.90},
+            )
+            self.ax.set_title("Accepted Room Layout Preview")
+            self.fig.canvas.draw_idle()
+            self.fig.canvas.flush_events()
+            self.plt.pause(0.001)
+        except Exception as exc:
+            print(f"[Preview] layout preview disabled during update: {type(exc).__name__}: {exc}")
+            self.enabled = False
+
+    def finalize(self) -> None:
+        if self.plt is None:
+            return
+        try:
+            self.plt.ioff()
+            self.plt.pause(0.001)
+        except Exception:
+            pass
+
+
 class AcousticScenarioSampler:
     """随机场景采样器：负责房间参数与三节点几何布局生成。"""
 
@@ -242,62 +379,189 @@ class AcousticScenarioSampler:
                         return False
         return True
 
+    def _neighbor_causality_status(
+        self,
+        ref_positions: np.ndarray,
+        sec_positions: np.ndarray,
+        err_positions: np.ndarray,
+    ) -> tuple[bool, float]:
+        violations = 0
+        min_margin = float("inf")
+        for i in range(self.cfg.num_nodes):
+            for j in range(self.cfg.num_nodes):
+                if i == j:
+                    continue
+                d_ref = float(np.linalg.norm(sec_positions[j] - ref_positions[i]))
+                d_err = float(np.linalg.norm(sec_positions[j] - err_positions[i]))
+                min_margin = min(min_margin, d_err - d_ref)
+                if d_ref > d_err + float(self.cfg.neighbor_causality_tolerance):
+                    violations += 1
+                    if violations > int(self.cfg.max_causality_violations):
+                        return False, float(min_margin)
+        if not np.isfinite(min_margin):
+            min_margin = 0.0
+        return True, float(min_margin)
+
     def _sample_room_size(self) -> np.ndarray:
         return self.rng.uniform(self.cfg.room_size_min, self.cfg.room_size_max, size=3).astype(float)
 
-    def _sample_source_position(self, room_size: np.ndarray) -> np.ndarray:
-        max_err_radius = self.cfg.ref_radius_range[1] + self.cfg.sec_delta_range[1] + self.cfg.err_delta_range[1]
+    def _sample_source_position(self, room_size: np.ndarray, xy_margin: float | None = None) -> np.ndarray:
+        margin_xy = float(self.cfg.source_wall_margin if xy_margin is None else xy_margin)
+        margin_xy = max(margin_xy, float(self.cfg.wall_margin))
+        z_margin = max(float(self.cfg.wall_margin + 0.10), 0.55)
 
-        side_margin_xy = min(float(np.min(room_size[:2]) / 2.0 - 0.05), self.cfg.wall_margin + max_err_radius + 0.05)
-        if side_margin_xy <= self.cfg.wall_margin:
-            raise QCError("geometry:room_too_small_for_margin")
+        low = np.array([margin_xy, margin_xy, z_margin], dtype=float)
+        high = room_size - low
+        if np.any(high <= low):
+            raise QCError("geometry:room_too_small_for_source_sampling")
 
-        z_margin = min(float(room_size[2] / 2.0 - 0.05), max(0.7, self.cfg.wall_margin + 0.35))
-        if z_margin <= self.cfg.wall_margin:
-            raise QCError("geometry:room_height_too_small")
+        return self.rng.uniform(low, high).astype(float)
+
+    def _sample_source_in_ranges(
+        self,
+        room_size: np.ndarray,
+        x_range: tuple[float, float],
+        y_range: tuple[float, float],
+    ) -> np.ndarray:
+        z_low = max(float(self.cfg.wall_margin + 0.10), 0.55)
+        z_high = float(room_size[2] - z_low)
+        if x_range[1] <= x_range[0] or y_range[1] <= y_range[0] or z_high <= z_low:
+            return self._sample_source_position(room_size)
 
         return np.array(
             [
-                self.rng.uniform(side_margin_xy, room_size[0] - side_margin_xy),
-                self.rng.uniform(side_margin_xy, room_size[1] - side_margin_xy),
-                self.rng.uniform(z_margin, room_size[2] - z_margin),
+                self.rng.uniform(*x_range),
+                self.rng.uniform(*y_range),
+                self.rng.uniform(z_low, z_high),
             ],
             dtype=float,
         )
 
-    def sample(self) -> dict[str, Any]:
-        for _ in range(1200):
-            room_size = self._sample_room_size()
-            source_pos = self._sample_source_position(room_size)
+    def _sample_secondary_height(self, room_size: np.ndarray) -> float:
+        z_low = max(float(self.cfg.wall_margin + 0.05), float(self.cfg.secondary_height_range[0]))
+        z_high = min(float(room_size[2] - self.cfg.wall_margin - 0.05), float(self.cfg.secondary_height_range[1]))
+        if z_high <= z_low:
+            raise QCError("geometry:room_height_too_small_for_devices")
+        return float(self.rng.uniform(z_low, z_high))
 
-            base_start = self.rng.uniform(0.0, 360.0)
+    def _sample_unit_xy(self) -> np.ndarray:
+        theta = float(self.rng.uniform(0.0, 2.0 * np.pi))
+        return np.array([np.cos(theta), np.sin(theta), 0.0], dtype=float)
+
+    def _sample_room_acoustics(self) -> tuple[float, int]:
+        if float(self.rng.random()) < float(self.cfg.reflection_room_probability):
+            absorption = self.rng.uniform(*self.cfg.reflection_room_absorption_range)
+            image_order = int(
+                self.rng.choice(
+                    self.cfg.reflection_room_image_order_choices,
+                    p=self.cfg.reflection_room_image_order_probs,
+                )
+            )
+        else:
+            absorption = self.rng.uniform(*self.cfg.direct_room_absorption_range)
+            image_order = int(
+                self.rng.choice(
+                    self.cfg.direct_room_image_order_choices,
+                    p=self.cfg.direct_room_image_order_probs,
+                )
+            )
+        return float(absorption), int(image_order)
+
+    def _sample_layout_mode(self) -> str:
+        return str(self.rng.choice(self.cfg.layout_mode_choices, p=self.cfg.layout_mode_probs))
+
+    def _layout_metadata(
+        self,
+        source_pos: np.ndarray,
+        ref_positions: np.ndarray,
+        sec_positions: np.ndarray,
+        err_positions: np.ndarray,
+    ) -> dict[str, np.ndarray]:
+        source_pos = np.asarray(source_pos, dtype=float)
+        sec_vec = np.asarray(sec_positions, dtype=float) - source_pos
+        azimuth_deg = (np.degrees(np.arctan2(sec_vec[:, 1], sec_vec[:, 0])) + 360.0) % 360.0
+
+        return {
+            "azimuth_deg": azimuth_deg.astype(float),
+            "ref_radii": np.linalg.norm(np.asarray(ref_positions, dtype=float) - source_pos, axis=1).astype(float),
+            "sec_radii": np.linalg.norm(np.asarray(sec_positions, dtype=float) - source_pos, axis=1).astype(float),
+            "err_radii": np.linalg.norm(np.asarray(err_positions, dtype=float) - source_pos, axis=1).astype(float),
+            "z_offsets": (np.asarray(sec_positions, dtype=float)[:, 2] - source_pos[2]).astype(float),
+        }
+
+    def _sample_local_direction(self, sec_pos: np.ndarray, focus_point: np.ndarray) -> np.ndarray:
+        direction = np.asarray(sec_pos, dtype=float) - np.asarray(focus_point, dtype=float)
+        direction[2] = 0.0
+        norm = float(np.linalg.norm(direction))
+        if norm <= 1.0e-9:
+            direction = self._sample_unit_xy()
+        else:
+            direction = direction / norm
+
+        direction[2] = float(self.rng.uniform(*self.cfg.node_direction_tilt_range))
+        direction /= max(float(np.linalg.norm(direction)), 1.0e-9)
+        return direction
+
+    def _derive_triplets_from_secondary(
+        self,
+        sec_positions: np.ndarray,
+        focus_point: np.ndarray,
+        room_size: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        sec_positions = np.asarray(sec_positions, dtype=float)
+
+        for _ in range(40):
+            ref_positions = np.zeros_like(sec_positions, dtype=float)
+            err_positions = np.zeros_like(sec_positions, dtype=float)
+            for i, sec_pos in enumerate(sec_positions):
+                direction = self._sample_local_direction(sec_pos, focus_point)
+                ref_gap = float(self.rng.uniform(*self.cfg.node_ref_to_sec_range))
+                err_gap = ref_gap + float(self.rng.uniform(*self.cfg.node_err_extra_range))
+                ref_positions[i] = sec_pos - direction * ref_gap
+                err_positions[i] = sec_pos + direction * err_gap
+
+            if self._all_inside_room(ref_positions, room_size) and self._all_inside_room(err_positions, room_size):
+                return ref_positions, err_positions
+
+        raise QCError("geometry:failed_to_place_triplets")
+
+    def _sample_source_radial_layout(self, room_size: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        for _ in range(80):
+            base_start = float(self.rng.uniform(0.0, 360.0))
             spacing = np.array(self.cfg.azimuth_spacing_base, dtype=float)
-            spacing += self.rng.uniform(-self.cfg.azimuth_spacing_jitter, self.cfg.azimuth_spacing_jitter, size=self.cfg.num_nodes)
+            spacing += self.rng.uniform(
+                -self.cfg.azimuth_spacing_jitter,
+                self.cfg.azimuth_spacing_jitter,
+                size=self.cfg.num_nodes,
+            )
             azimuths = (base_start + spacing) % 360.0
+
+            per_node = []
+            max_err_radius = 0.0
+            for az in azimuths:
+                ref_r = float(self.rng.uniform(*self.cfg.ref_radius_range))
+                sec_r = ref_r + float(self.rng.uniform(*self.cfg.sec_delta_range))
+                err_r = sec_r + float(self.rng.uniform(*self.cfg.err_delta_range))
+                z_off = float(self.rng.uniform(*self.cfg.z_offset_range))
+                per_node.append((float(az), ref_r, sec_r, err_r, z_off))
+                max_err_radius = max(max_err_radius, err_r)
+
+            side_margin_xy = min(
+                float(np.min(room_size[:2]) / 2.0 - 0.05),
+                float(self.cfg.wall_margin + max_err_radius + 0.05),
+            )
+            if side_margin_xy <= float(self.cfg.wall_margin):
+                continue
+
+            source_pos = self._sample_source_position(room_size, xy_margin=side_margin_xy)
 
             ref_positions = []
             sec_positions = []
             err_positions = []
-            ref_radii = []
-            sec_radii = []
-            err_radii = []
-            z_offsets = []
-
-            for az in azimuths:
-                ref_r = self.rng.uniform(*self.cfg.ref_radius_range)
-                sec_r = ref_r + self.rng.uniform(*self.cfg.sec_delta_range)
-                err_r = sec_r + self.rng.uniform(*self.cfg.err_delta_range)
-                z_off = self.rng.uniform(*self.cfg.z_offset_range)
-
-                ref_radii.append(ref_r)
-                sec_radii.append(sec_r)
-                err_radii.append(err_r)
-                z_offsets.append(z_off)
-
+            for az, ref_r, sec_r, err_r, z_off in per_node:
                 theta = np.deg2rad(az)
                 direction = np.array([np.cos(theta), np.sin(theta), 0.0], dtype=float)
                 z_vec = np.array([0.0, 0.0, z_off], dtype=float)
-
                 ref_positions.append(source_pos + direction * ref_r + z_vec)
                 sec_positions.append(source_pos + direction * sec_r + z_vec)
                 err_positions.append(source_pos + direction * err_r + z_vec)
@@ -305,6 +569,183 @@ class AcousticScenarioSampler:
             ref_positions = np.asarray(ref_positions, dtype=float)
             sec_positions = np.asarray(sec_positions, dtype=float)
             err_positions = np.asarray(err_positions, dtype=float)
+            if self._all_inside_room(ref_positions, room_size) and self._all_inside_room(sec_positions, room_size) and self._all_inside_room(err_positions, room_size):
+                return source_pos, ref_positions, sec_positions, err_positions
+
+        raise QCError("geometry:failed_source_radial_layout")
+
+    def _sample_wall_strip_layout(self, room_size: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        outward_gap = float(self.cfg.node_ref_to_sec_range[1] + self.cfg.node_err_extra_range[1])
+        base_margin = float(self.cfg.wall_margin + outward_gap + 0.05)
+
+        for _ in range(80):
+            axis = int(self.rng.integers(0, 2))
+            low_side = bool(self.rng.integers(0, 2) == 0)
+            sec_positions = np.zeros((self.cfg.num_nodes, 3), dtype=float)
+
+            if axis == 0:
+                x_base = base_margin + float(self.rng.uniform(0.05, 0.35))
+                x_base = x_base if low_side else float(room_size[0] - x_base)
+                y_low = float(self.cfg.wall_margin + 0.20)
+                y_high = float(room_size[1] - self.cfg.wall_margin - 0.20)
+                if y_high <= y_low:
+                    continue
+                y_center = float(self.rng.uniform(y_low, y_high))
+                max_half_span = max((y_high - y_low) / 2.0, 0.20)
+                half_span_hi = min(1.40, max_half_span)
+                if half_span_hi <= 0.20:
+                    continue
+                half_span = float(self.rng.uniform(0.20, half_span_hi))
+                span_low = max(y_low, y_center - half_span)
+                span_high = min(y_high, y_center + half_span)
+                if span_high <= span_low:
+                    continue
+
+                sec_positions[:, 0] = x_base + self.rng.uniform(-0.08, 0.08, size=self.cfg.num_nodes)
+                sec_positions[:, 1] = np.sort(self.rng.uniform(span_low, span_high, size=self.cfg.num_nodes))
+
+                if low_side:
+                    source_x = (max(float(room_size[0] * 0.45), self.cfg.source_wall_margin), float(room_size[0] - self.cfg.source_wall_margin))
+                else:
+                    source_x = (float(self.cfg.source_wall_margin), min(float(room_size[0] * 0.55), float(room_size[0] - self.cfg.source_wall_margin)))
+                source_y = (float(self.cfg.source_wall_margin), float(room_size[1] - self.cfg.source_wall_margin))
+            else:
+                y_base = base_margin + float(self.rng.uniform(0.05, 0.35))
+                y_base = y_base if low_side else float(room_size[1] - y_base)
+                x_low = float(self.cfg.wall_margin + 0.20)
+                x_high = float(room_size[0] - self.cfg.wall_margin - 0.20)
+                if x_high <= x_low:
+                    continue
+                x_center = float(self.rng.uniform(x_low, x_high))
+                max_half_span = max((x_high - x_low) / 2.0, 0.20)
+                half_span_hi = min(1.40, max_half_span)
+                if half_span_hi <= 0.20:
+                    continue
+                half_span = float(self.rng.uniform(0.20, half_span_hi))
+                span_low = max(x_low, x_center - half_span)
+                span_high = min(x_high, x_center + half_span)
+                if span_high <= span_low:
+                    continue
+
+                sec_positions[:, 0] = np.sort(self.rng.uniform(span_low, span_high, size=self.cfg.num_nodes))
+                sec_positions[:, 1] = y_base + self.rng.uniform(-0.08, 0.08, size=self.cfg.num_nodes)
+
+                source_x = (float(self.cfg.source_wall_margin), float(room_size[0] - self.cfg.source_wall_margin))
+                if low_side:
+                    source_y = (max(float(room_size[1] * 0.45), self.cfg.source_wall_margin), float(room_size[1] - self.cfg.source_wall_margin))
+                else:
+                    source_y = (float(self.cfg.source_wall_margin), min(float(room_size[1] * 0.55), float(room_size[1] - self.cfg.source_wall_margin)))
+
+            for i in range(self.cfg.num_nodes):
+                sec_positions[i, 2] = self._sample_secondary_height(room_size)
+
+            focus_point = np.asarray(room_size, dtype=float) / 2.0
+            ref_positions, err_positions = self._derive_triplets_from_secondary(sec_positions, focus_point, room_size)
+            source_pos = self._sample_source_in_ranges(room_size, source_x, source_y)
+            return source_pos, ref_positions, sec_positions, err_positions
+
+        raise QCError("geometry:failed_wall_strip_layout")
+
+    def _sample_corner_cluster_layout(self, room_size: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        outward_gap = float(self.cfg.node_ref_to_sec_range[1] + self.cfg.node_err_extra_range[1])
+        inner_margin = float(self.cfg.wall_margin + outward_gap + 0.05)
+
+        for _ in range(80):
+            x_low = bool(self.rng.integers(0, 2) == 0)
+            y_low = bool(self.rng.integers(0, 2) == 0)
+            sign_x = 1.0 if x_low else -1.0
+            sign_y = 1.0 if y_low else -1.0
+
+            max_span_x = float(room_size[0] - 2.0 * inner_margin - 0.10)
+            max_span_y = float(room_size[1] - 2.0 * inner_margin - 0.10)
+            if max_span_x <= 0.15 or max_span_y <= 0.15:
+                continue
+
+            span_x = float(self.rng.uniform(0.15, min(1.25, max_span_x)))
+            span_y = float(self.rng.uniform(0.15, min(1.25, max_span_y)))
+            base_x = inner_margin + float(self.rng.uniform(0.05, 0.35))
+            base_y = inner_margin + float(self.rng.uniform(0.05, 0.35))
+            base_x = base_x if x_low else float(room_size[0] - base_x)
+            base_y = base_y if y_low else float(room_size[1] - base_y)
+
+            sec_positions = np.zeros((self.cfg.num_nodes, 3), dtype=float)
+            for i in range(self.cfg.num_nodes):
+                sec_positions[i, 0] = base_x + sign_x * float(self.rng.uniform(0.0, span_x))
+                sec_positions[i, 1] = base_y + sign_y * float(self.rng.uniform(0.0, span_y))
+                sec_positions[i, 2] = self._sample_secondary_height(room_size)
+
+            focus_point = np.asarray(room_size, dtype=float) / 2.0
+            ref_positions, err_positions = self._derive_triplets_from_secondary(sec_positions, focus_point, room_size)
+
+            if x_low:
+                source_x = (max(float(room_size[0] * 0.55), self.cfg.source_wall_margin), float(room_size[0] - self.cfg.source_wall_margin))
+            else:
+                source_x = (float(self.cfg.source_wall_margin), min(float(room_size[0] * 0.45), float(room_size[0] - self.cfg.source_wall_margin)))
+            if y_low:
+                source_y = (max(float(room_size[1] * 0.55), self.cfg.source_wall_margin), float(room_size[1] - self.cfg.source_wall_margin))
+            else:
+                source_y = (float(self.cfg.source_wall_margin), min(float(room_size[1] * 0.45), float(room_size[1] - self.cfg.source_wall_margin)))
+
+            source_pos = self._sample_source_in_ranges(room_size, source_x, source_y)
+            return source_pos, ref_positions, sec_positions, err_positions
+
+        raise QCError("geometry:failed_corner_cluster_layout")
+
+    def _sample_free_scatter_layout(self, room_size: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        outward_gap = float(self.cfg.node_ref_to_sec_range[1] + self.cfg.node_err_extra_range[1])
+        xy_margin = float(self.cfg.wall_margin + outward_gap + 0.08)
+
+        for _ in range(120):
+            if room_size[0] <= 2.0 * xy_margin or room_size[1] <= 2.0 * xy_margin:
+                continue
+
+            sec_positions = np.zeros((self.cfg.num_nodes, 3), dtype=float)
+            for i in range(self.cfg.num_nodes):
+                sec_positions[i] = np.array(
+                    [
+                        self.rng.uniform(xy_margin, room_size[0] - xy_margin),
+                        self.rng.uniform(xy_margin, room_size[1] - xy_margin),
+                        self._sample_secondary_height(room_size),
+                    ],
+                    dtype=float,
+                )
+
+            if self._min_pairwise_distance(sec_positions) < float(self.cfg.min_secondary_node_distance * 1.05):
+                continue
+
+            centroid = np.mean(sec_positions, axis=0)
+            focus_point = 0.5 * centroid + 0.5 * (np.asarray(room_size, dtype=float) / 2.0)
+            ref_positions, err_positions = self._derive_triplets_from_secondary(sec_positions, focus_point, room_size)
+
+            if centroid[0] <= float(room_size[0] / 2.0):
+                source_x = (max(float(room_size[0] * 0.45), self.cfg.source_wall_margin), float(room_size[0] - self.cfg.source_wall_margin))
+            else:
+                source_x = (float(self.cfg.source_wall_margin), min(float(room_size[0] * 0.55), float(room_size[0] - self.cfg.source_wall_margin)))
+            if centroid[1] <= float(room_size[1] / 2.0):
+                source_y = (max(float(room_size[1] * 0.45), self.cfg.source_wall_margin), float(room_size[1] - self.cfg.source_wall_margin))
+            else:
+                source_y = (float(self.cfg.source_wall_margin), min(float(room_size[1] * 0.55), float(room_size[1] - self.cfg.source_wall_margin)))
+
+            source_pos = self._sample_source_in_ranges(room_size, source_x, source_y)
+            return source_pos, ref_positions, sec_positions, err_positions
+
+        raise QCError("geometry:failed_free_scatter_layout")
+
+    def sample(self) -> dict[str, Any]:
+        for _ in range(1200):
+            room_size = self._sample_room_size()
+            layout_mode = self._sample_layout_mode()
+            try:
+                if layout_mode == "source_radial":
+                    source_pos, ref_positions, sec_positions, err_positions = self._sample_source_radial_layout(room_size)
+                elif layout_mode == "wall_strip":
+                    source_pos, ref_positions, sec_positions, err_positions = self._sample_wall_strip_layout(room_size)
+                elif layout_mode == "corner_cluster":
+                    source_pos, ref_positions, sec_positions, err_positions = self._sample_corner_cluster_layout(room_size)
+                else:
+                    source_pos, ref_positions, sec_positions, err_positions = self._sample_free_scatter_layout(room_size)
+            except QCError:
+                continue
 
             if not self._all_inside_room(ref_positions, room_size):
                 continue
@@ -319,13 +760,16 @@ class AcousticScenarioSampler:
             all_devices = np.vstack([ref_positions, sec_positions, err_positions])
             if self._min_pairwise_distance(all_devices) < self.cfg.min_device_distance:
                 continue
+            if float(np.min(np.linalg.norm(all_devices - np.asarray(source_pos, dtype=float), axis=1))) < float(self.cfg.min_source_device_distance):
+                continue
 
-            if not self._check_neighbor_speaker_causality(ref_positions, sec_positions, err_positions):
+            causality_ok, causality_margin_min = self._neighbor_causality_status(ref_positions, sec_positions, err_positions)
+            if not causality_ok:
                 continue
 
             sound_speed = self.rng.uniform(self.cfg.sound_speed_min, self.cfg.sound_speed_max)
-            absorption = self.rng.uniform(self.cfg.absorption_min, self.cfg.absorption_max)
-            image_order = int(self.rng.choice(self.cfg.image_order_choices, p=self.cfg.image_order_probs))
+            absorption, image_order = self._sample_room_acoustics()
+            layout_meta = self._layout_metadata(source_pos, ref_positions, sec_positions, err_positions)
 
             return {
                 "room_size": room_size,
@@ -333,14 +777,12 @@ class AcousticScenarioSampler:
                 "ref_positions": ref_positions,
                 "sec_positions": sec_positions,
                 "err_positions": err_positions,
-                "azimuth_deg": np.asarray(azimuths, dtype=float),
-                "ref_radii": np.asarray(ref_radii, dtype=float),
-                "sec_radii": np.asarray(sec_radii, dtype=float),
-                "err_radii": np.asarray(err_radii, dtype=float),
-                "z_offsets": np.asarray(z_offsets, dtype=float),
+                **layout_meta,
                 "sound_speed": float(sound_speed),
                 "absorption": float(absorption),
                 "image_order": image_order,
+                "layout_mode": layout_mode,
+                "causality_margin_min": float(causality_margin_min),
             }
 
         raise QCError("geometry:failed_to_sample_valid_layout")
@@ -618,6 +1060,8 @@ class HDF5DatasetWriter:
         room.create_dataset("sound_speed", shape=(n,), dtype="f4")
         room.create_dataset("material_absorption", shape=(n,), dtype="f4")
         room.create_dataset("image_source_order", shape=(n,), dtype="i4")
+        room.create_dataset("causality_margin_min", shape=(n,), dtype="f4")
+        room.create_dataset("layout_mode", shape=(n,), dtype=h5py.string_dtype(encoding="utf-8"))
 
         raw.create_dataset("x_ref", shape=(n, self.cfg.num_nodes, self.cfg.ref_window_samples), dtype="f4")
         # 兼容旧流程: 仅保留对角线(本节点)次级通路。
@@ -684,6 +1128,8 @@ class HDF5DatasetWriter:
         self.h5["raw/room_params/sound_speed"][idx] = float(sample.room_params["sound_speed"])
         self.h5["raw/room_params/material_absorption"][idx] = float(sample.room_params["absorption"])
         self.h5["raw/room_params/image_source_order"][idx] = int(sample.room_params["image_order"])
+        self.h5["raw/room_params/causality_margin_min"][idx] = float(sample.room_params["causality_margin_min"])
+        self.h5["raw/room_params/layout_mode"][idx] = str(sample.room_params["layout_mode"])
 
         self.h5["raw/x_ref"][idx] = sample.x_ref.astype(np.float32)
         diag_idx = np.arange(self.cfg.num_nodes, dtype=int)
@@ -724,6 +1170,7 @@ class ANCDatasetBuilder:
         self.sampler = AcousticScenarioSampler(cfg, self.rng)
         self.qc = ANCQualityController(cfg)
         self.feature_processor = FeatureProcessor(cfg)
+        self.layout_previewer = LayoutPreviewer(cfg)
 
         self.failure_stats: dict[str, int] = {}
 
@@ -832,6 +1279,8 @@ class ANCDatasetBuilder:
                     sample = self._build_single_sample()
                     writer.write(accepted, sample)
                     accepted += 1
+                    preview_mgr = self.sampler.build_manager(sample.room_params)
+                    self.layout_previewer.update(preview_mgr, sample.room_params, accepted, attempts)
 
                     if accepted % self.cfg.progress_interval == 0 or accepted == self.cfg.target_rooms:
                         print(
@@ -867,6 +1316,7 @@ class ANCDatasetBuilder:
             writer.h5.attrs["failure_stats_json"] = json.dumps(self.failure_stats, ensure_ascii=False)
             writer.h5.flush()
         finally:
+            self.layout_previewer.finalize()
             writer.close()
 
         print("数据集原始与局部特征已写入完成。")
@@ -982,6 +1432,24 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# Override the legacy argparse block above with clean, UTF-8 help text.
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="构建带 QC 与全局 SVD 的 CFxLMS 多通道 ANC 数据集。")
+    parser.add_argument("--num-rooms", type=int, default=1000, help="目标通过 QC 的房间样本数。")
+    parser.add_argument("--max-attempts", type=int, default=30000, help="总尝试上限，失败会自动重采样。")
+    parser.add_argument("--seed", type=int, default=20260329, help="随机种子。")
+    parser.add_argument(
+        "--output-h5",
+        type=str,
+        default=str(ROOT_DIR / "python_scripts" / "cfxlms_qc_dataset.h5"),
+        help="输出 HDF5 文件路径。",
+    )
+    parser.add_argument("--svd-components", type=int, default=32, help="全局 SVD 主成分数。")
+    parser.add_argument("--no-preview-layouts", action="store_true", help="关闭实时布局预览窗口。")
+    parser.add_argument("--preview-interval", type=int, default=1, help="每通过多少个样本刷新一次布局预览。")
+    return parser.parse_args()
+
+
 def _print_run_parameters(cfg: DatasetBuildConfig) -> None:
     print("========== 数据集运行参数 ==========")
     print("参数对齐说明: 除三节点几何布局外，核心仿真参数与 test.py 对齐。")
@@ -1022,6 +1490,8 @@ def main() -> None:
         random_seed=int(args.seed),
         output_h5=str(args.output_h5),
         svd_components=int(args.svd_components),
+        layout_preview=not bool(args.no_preview_layouts),
+        layout_preview_interval=max(int(args.preview_interval), 1),
     )
 
     print("开始构建 CFxLMS 高质量数据集...")
