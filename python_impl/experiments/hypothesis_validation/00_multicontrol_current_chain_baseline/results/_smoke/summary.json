@@ -1,0 +1,242 @@
+{
+  "h5_path": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\experiments\\hypothesis_validation\\00_multicontrol_current_chain_baseline\\data\\_smoke.h5",
+  "input_variant": "base",
+  "epochs": 1,
+  "elapsed_s": 205.28239345550537,
+  "train_probe_indices": [
+    0,
+    6,
+    13,
+    12,
+    4,
+    1,
+    15,
+    3,
+    2,
+    5,
+    10,
+    8
+  ],
+  "val_probe_indices": [
+    14,
+    7,
+    9
+  ],
+  "exact_train_probe": {
+    "room_indices": [
+      0,
+      6,
+      13,
+      12,
+      4,
+      1,
+      15,
+      3,
+      2,
+      5,
+      10,
+      8
+    ],
+    "ai_vs_zero_db_mean": 5.077449013390253,
+    "exact_vs_zero_db_mean": 5.077834737577976,
+    "h5_vs_zero_db_mean": 20.098887697295357,
+    "ai_to_exact_gap_db_mean": 0.0005053249771906909,
+    "ai_to_h5_gap_db_mean": 15.021438683905101,
+    "plant_residual_mean": 0.11594651957529285,
+    "per_room": [
+      {
+        "ai_vs_zero_db": 7.642198997287203,
+        "exact_vs_zero_db": 7.642336898182343,
+        "h5_vs_zero_db": 18.981472604563372,
+        "ai_to_exact_gap_db": 0.00013790089514031934,
+        "ai_to_h5_gap_db": 11.339273607276171,
+        "room_idx": 0,
+        "plant_residual": 0.11887357928202234
+      },
+      {
+        "ai_vs_zero_db": 3.8770419360042787,
+        "exact_vs_zero_db": 3.876515927153643,
+        "h5_vs_zero_db": 18.662204736374793,
+        "ai_to_exact_gap_db": 0.0005260088506355842,
+        "ai_to_h5_gap_db": 14.785162800370514,
+        "room_idx": 6,
+        "plant_residual": 0.16165063140481994
+      },
+      {
+        "ai_vs_zero_db": 5.240870143745787,
+        "exact_vs_zero_db": 5.240936978872344,
+        "h5_vs_zero_db": 19.674723624597913,
+        "ai_to_exact_gap_db": 6.683512655669688e-05,
+        "ai_to_h5_gap_db": 14.433853480852127,
+        "room_idx": 13,
+        "plant_residual": 0.05075991998692088
+      },
+      {
+        "ai_vs_zero_db": 3.2214213635009177,
+        "exact_vs_zero_db": 3.221250298181017,
+        "h5_vs_zero_db": 18.38848402198297,
+        "ai_to_exact_gap_db": 0.00017106531990052076,
+        "ai_to_h5_gap_db": 15.167062658482052,
+        "room_idx": 12,
+        "plant_residual": 0.07328929892968924
+      },
+      {
+        "ai_vs_zero_db": 3.981128409591605,
+        "exact_vs_zero_db": 3.9811321818936154,
+        "h5_vs_zero_db": 20.075952286262247,
+        "ai_to_exact_gap_db": 3.77230201031864e-06,
+        "ai_to_h5_gap_db": 16.09482387667064,
+        "room_idx": 4,
+        "plant_residual": 0.1018389685824001
+      },
+      {
+        "ai_vs_zero_db": 4.910895176980819,
+        "exact_vs_zero_db": 4.910900804792346,
+        "h5_vs_zero_db": 19.603402112364385,
+        "ai_to_exact_gap_db": 5.627811527020299e-06,
+        "ai_to_h5_gap_db": 14.692506935383566,
+        "room_idx": 1,
+        "plant_residual": 0.2040080949470601
+      },
+      {
+        "ai_vs_zero_db": 4.225347747081068,
+        "exact_vs_zero_db": 4.225340795496473,
+        "h5_vs_zero_db": 20.563012589012786,
+        "ai_to_exact_gap_db": 6.951584595071836e-06,
+        "ai_to_h5_gap_db": 16.33766484193172,
+        "room_idx": 15,
+        "plant_residual": 0.07374244277482396
+      },
+      {
+        "ai_vs_zero_db": 9.670092870470452,
+        "exact_vs_zero_db": 9.673838049744035,
+        "h5_vs_zero_db": 20.057614180955753,
+        "ai_to_exact_gap_db": 0.003745179273582977,
+        "ai_to_h5_gap_db": 10.387521310485297,
+        "room_idx": 3,
+        "plant_residual": 0.16028154867534075
+      },
+      {
+        "ai_vs_zero_db": 4.428338297487284,
+        "exact_vs_zero_db": 4.428338299943731,
+        "h5_vs_zero_db": 21.15943321883553,
+        "ai_to_exact_gap_db": 2.456447489862512e-09,
+        "ai_to_h5_gap_db": 16.73109492134825,
+        "room_idx": 2,
+        "plant_residual": 0.12651741130671412
+      },
+      {
+        "ai_vs_zero_db": 4.2183223655906135,
+        "exact_vs_zero_db": 4.218308786608934,
+        "h5_vs_zero_db": 21.697317308802027,
+        "ai_to_exact_gap_db": 1.3578981679529534e-05,
+        "ai_to_h5_gap_db": 17.47899494321141,
+        "room_idx": 5,
+        "plant_residual": 0.09794913832696989
+      },
+      {
+        "ai_vs_zero_db": 4.949363168251385,
+        "exact_vs_zero_db": 4.950723537035947,
+        "h5_vs_zero_db": 24.293849552471862,
+        "ai_to_exact_gap_db": 0.0013603687845620271,
+        "ai_to_h5_gap_db": 19.344486384220474,
+        "room_idx": 10,
+        "plant_residual": 0.16341912974013945
+      },
+      {
+        "ai_vs_zero_db": 4.564367684691618,
+        "exact_vs_zero_db": 4.564394293031269,
+        "h5_vs_zero_db": 18.02918613132061,
+        "ai_to_exact_gap_db": 2.6608339650735502e-05,
+        "ai_to_h5_gap_db": 13.464818446628993,
+        "room_idx": 8,
+        "plant_residual": 0.05902807094661341
+      }
+    ]
+  },
+  "exact_val_probe": {
+    "room_indices": [
+      14,
+      7,
+      9
+    ],
+    "ai_vs_zero_db_mean": 4.695629439164065,
+    "exact_vs_zero_db_mean": 4.700284833581732,
+    "h5_vs_zero_db_mean": 20.670833088604507,
+    "ai_to_exact_gap_db_mean": 0.004673087865940673,
+    "ai_to_h5_gap_db_mean": 15.975203649440438,
+    "plant_residual_mean": 0.12348827678532155,
+    "per_room": [
+      {
+        "ai_vs_zero_db": 5.220855966529134,
+        "exact_vs_zero_db": 5.220855580421691,
+        "h5_vs_zero_db": 20.738182193375053,
+        "ai_to_exact_gap_db": 3.861074429067912e-07,
+        "ai_to_h5_gap_db": 15.517326226845919,
+        "room_idx": 14,
+        "plant_residual": 0.08884388762077527
+      },
+      {
+        "ai_vs_zero_db": 4.690516327654769,
+        "exact_vs_zero_db": 4.704509051080181,
+        "h5_vs_zero_db": 22.73402737029855,
+        "ai_to_exact_gap_db": 0.013992723425412024,
+        "ai_to_h5_gap_db": 18.04351104264378,
+        "room_idx": 7,
+        "plant_residual": 0.24627512823979877
+      },
+      {
+        "ai_vs_zero_db": 4.175516023308294,
+        "exact_vs_zero_db": 4.175489869243327,
+        "h5_vs_zero_db": 18.540289702139912,
+        "ai_to_exact_gap_db": 2.615406496708772e-05,
+        "ai_to_h5_gap_db": 14.36477367883162,
+        "room_idx": 9,
+        "plant_residual": 0.035345814495390634
+      }
+    ]
+  },
+  "best_replay_metrics": {
+    "room_indices": [
+      14,
+      7,
+      9
+    ],
+    "ai_vs_zero_db_mean": -1.2835811835921451,
+    "exact_vs_zero_db_mean": 4.700284833581732,
+    "h5_vs_zero_db_mean": 20.670833088604507,
+    "ai_to_exact_gap_db_mean": 5.983866017173878,
+    "ai_to_h5_gap_db_mean": 21.954414272196647,
+    "plant_residual_mean": 1.6509407271762895,
+    "per_room": [
+      {
+        "ai_vs_zero_db": -0.642651908871481,
+        "exact_vs_zero_db": 5.220855580421691,
+        "h5_vs_zero_db": 20.738182193375053,
+        "ai_to_exact_gap_db": 5.8635074892931724,
+        "ai_to_h5_gap_db": 21.38083410224653,
+        "room_idx": 14,
+        "plant_residual": 1.268026076693802
+      },
+      {
+        "ai_vs_zero_db": -2.6868984144950367,
+        "exact_vs_zero_db": 4.704509051080181,
+        "h5_vs_zero_db": 22.73402737029855,
+        "ai_to_exact_gap_db": 7.3914074655752176,
+        "ai_to_h5_gap_db": 25.420925784793585,
+        "room_idx": 7,
+        "plant_residual": 2.3707448458831375
+      },
+      {
+        "ai_vs_zero_db": -0.5211932274099178,
+        "exact_vs_zero_db": 4.175489869243327,
+        "h5_vs_zero_db": 18.540289702139912,
+        "ai_to_exact_gap_db": 4.696683096653245,
+        "ai_to_h5_gap_db": 19.061482929549832,
+        "room_idx": 9,
+        "plant_residual": 1.314051258951929
+      }
+    ],
+    "epoch": 1
+  }
+}

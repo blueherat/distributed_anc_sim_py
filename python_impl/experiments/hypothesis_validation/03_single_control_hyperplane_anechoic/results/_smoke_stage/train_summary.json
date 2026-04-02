@@ -1,0 +1,25 @@
+{
+  "h5_path": "python_impl/experiments/hypothesis_validation/03_single_control_hyperplane_anechoic/data/_smoke.h5",
+  "stage_id": "03",
+  "level": "L1",
+  "feature_kind": "positions",
+  "val_metric_room_count": 19,
+  "models": {
+    "hyperplane": {
+      "checkpoint_path": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\experiments\\hypothesis_validation\\03_single_control_hyperplane_anechoic\\results\\_smoke_stage\\positions_hyperplane_best.pt",
+      "best_val_loss": 75572813824.0,
+      "best_val_replay_gain_mean_db": -57.79764883838944,
+      "best_val_replay_gap_mean_db": 71.33011346814841,
+      "loss_curve_path": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\experiments\\hypothesis_validation\\03_single_control_hyperplane_anechoic\\results\\_smoke_stage\\positions_hyperplane_loss_curves.png",
+      "epoch_metrics_csv": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\experiments\\hypothesis_validation\\03_single_control_hyperplane_anechoic\\results\\_smoke_stage\\positions_hyperplane_epoch_metrics.csv"
+    },
+    "w_mse": {
+      "checkpoint_path": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\experiments\\hypothesis_validation\\03_single_control_hyperplane_anechoic\\results\\_smoke_stage\\positions_w_mse_best.pt",
+      "best_val_loss": 2.2502048015594482,
+      "best_val_replay_gain_mean_db": -28.97181219728002,
+      "best_val_replay_gap_mean_db": 42.50427682703899,
+      "loss_curve_path": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\experiments\\hypothesis_validation\\03_single_control_hyperplane_anechoic\\results\\_smoke_stage\\positions_w_mse_loss_curves.png",
+      "epoch_metrics_csv": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\experiments\\hypothesis_validation\\03_single_control_hyperplane_anechoic\\results\\_smoke_stage\\positions_w_mse_epoch_metrics.csv"
+    }
+  }
+}

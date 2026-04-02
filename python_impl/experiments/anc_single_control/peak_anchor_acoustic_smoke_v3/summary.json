@@ -1,0 +1,68 @@
+{
+  "args": {
+    "h5_path": "python_impl/python_scripts/cfxlms_qc_dataset_single_control.h5",
+    "output_dir": "python_impl/experiments/anc_single_control/peak_anchor_acoustic_smoke_v3",
+    "model_kind": "acoustic",
+    "epochs": 1,
+    "batch_size": 64,
+    "val_frac": 0.2,
+    "seed": 20260331,
+    "lr": 0.0008,
+    "weight_decay": 0.0001,
+    "dropout": 0.15,
+    "device": "auto",
+    "tail_basis_dim": 8,
+    "local_half_width": 5,
+    "include_s2r": false,
+    "anchor_loss_weight": 1.0,
+    "local_loss_weight": 1.0,
+    "tail_loss_weight": 0.5,
+    "full_loss_weight": 0.25,
+    "anchor_label_smoothing": 0.05,
+    "replay_room_count": 2,
+    "replay_eval_interval": 1,
+    "replay_early_window_s": 0.25
+  },
+  "bundle_meta": {
+    "h5_path": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\python_scripts\\cfxlms_qc_dataset_single_control.h5",
+    "num_refs": 3,
+    "tap_len": 100,
+    "local_half_width": 5,
+    "local_len": 11,
+    "tail_basis_dim": 8,
+    "ref_cov_bins": 129,
+    "rir_len": 512,
+    "s_crop_len": 96,
+    "e_crop_len": 96,
+    "s2r_crop_len": 96,
+    "acoustic_shared_dim": 1265,
+    "acoustic_ref_dim": 99
+  },
+  "train_size": 1600,
+  "val_size": 400,
+  "replay_room_indices": [
+    158,
+    962
+  ],
+  "best_replay_gain_db": -1.5896195232173191,
+  "best_replay_gap_db": 27.194230940779832,
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 5.572010498046875,
+      "train_anchor_exact": 0.08916666666666667,
+      "train_anchor_within_1": 0.25354166666666667,
+      "train_local_capture": 0.5622415542602539,
+      "train_full_raw_mse": 2.777594272629358e-05,
+      "val_loss": 4.826645851135254,
+      "val_anchor_exact": 0.10166666666666667,
+      "val_anchor_within_1": 0.275,
+      "val_local_capture": 0.6036134958267212,
+      "val_full_raw_mse": 2.60258717025863e-05,
+      "replay_ai_vs_zero_db": -1.5896195232173191,
+      "replay_ai_to_h5_gap_db": 27.194230940779832,
+      "lr": 0.0008,
+      "seconds": 7.838840007781982
+    }
+  ]
+}

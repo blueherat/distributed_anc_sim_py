@@ -1,0 +1,5 @@
+{
+  "src_h5": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\python_scripts\\cfxlms_qc_dataset_multicontrol.h5",
+  "dst_h5": "python_impl\\experiments\\hypothesis_validation\\00_multicontrol_current_chain_baseline\\data\\_smoke.h5",
+  "num_rooms": 16
+}

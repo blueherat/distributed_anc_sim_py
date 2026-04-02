@@ -1,0 +1,2 @@
+epoch,train_loss,train_anchor_exact,train_anchor_within_1,train_local_capture,train_full_raw_mse,val_loss,val_anchor_exact,val_anchor_within_1,val_local_capture,val_full_raw_mse,replay_ai_vs_zero_db,replay_ai_to_h5_gap_db,lr,seconds
+1,5.572010498046875,0.08916666666666667,0.25354166666666667,0.5622415542602539,2.777594272629358e-05,4.826645851135254,0.10166666666666667,0.275,0.6036134958267212,2.60258717025863e-05,-1.5896195232173191,27.194230940779832,0.0008,7.838840007781982

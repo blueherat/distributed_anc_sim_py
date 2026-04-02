@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_THIS_DIR = Path(__file__).resolve().parent
+if str(_THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_THIS_DIR))
+
+from cfxlms_multi_control_dataset_impl import *
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+'''
+
 import argparse
 import json
 import random
@@ -62,14 +76,14 @@ class DatasetBuildConfig:
     reflection_room_image_order_probs: tuple[float, ...] = (0.80, 0.20)
 
     num_nodes: int = 3
-    min_secondary_node_distance: float = 0.25
+    min_secondary_node_distance: float = 0.40
     min_device_distance: float = 0.10
-    min_source_device_distance: float = 0.25
+    min_source_device_distance: float = 0.35
     neighbor_causality_tolerance: float = 0.0
     max_causality_violations: int = 0
 
     layout_mode_choices: tuple[str, ...] = ("source_radial", "wall_strip", "corner_cluster", "free_scatter")
-    layout_mode_probs: tuple[float, ...] = (0.05, 0.35, 0.30, 0.30)
+    layout_mode_probs: tuple[float, ...] = (0.15, 0.30, 0.10, 0.45)
     azimuth_spacing_base: tuple[float, ...] = (0.0, 120.0, 240.0)
     azimuth_spacing_jitter: float = 22.0
 
@@ -80,11 +94,14 @@ class DatasetBuildConfig:
     node_ref_to_sec_range: tuple[float, float] = (0.10, 0.32)
     node_err_extra_range: tuple[float, float] = (0.10, 0.45)
     secondary_height_range: tuple[float, float] = (0.95, 1.75)
-    node_direction_tilt_range: tuple[float, float] = (-0.10, 0.10)
+    node_direction_tilt_range: tuple[float, float] = (-0.04, 0.04)
+    source_barycentric_alpha: float = 2.8
+    min_secondary_triangle_area: float = 0.18
+    min_source_angle_separation_deg: float = 22.0
 
     mu_candidates: tuple[float, ...] = (1.0e-4,)
-    min_nr_last_db: float = 1.0
-    min_nr_gain_db: float = 0.3
+    min_nr_last_db: float = 15
+    min_nr_gain_db: float = 15
     anc_normalized_update: bool = False
     anc_norm_epsilon: float = 1.0e-8
 
@@ -358,6 +375,60 @@ class AcousticScenarioSampler:
         high = room_size - m
         return bool(np.all(points >= low) and np.all(points <= high))
 
+    @staticmethod
+    def _triangle_area_xy(points: np.ndarray) -> float:
+        pts = np.asarray(points, dtype=float)
+        if pts.shape[0] < 3:
+            return 0.0
+        a = pts[0, :2]
+        b = pts[1, :2]
+        c = pts[2, :2]
+        return float(0.5 * abs(np.cross(b - a, c - a)))
+
+    def _source_angle_separation_ok(self, source_pos: np.ndarray, sec_positions: np.ndarray) -> bool:
+        src_xy = np.asarray(source_pos, dtype=float)[:2]
+        sec_xy = np.asarray(sec_positions, dtype=float)[:, :2]
+        vec = sec_xy - src_xy[None, :]
+        norms = np.linalg.norm(vec, axis=1)
+        if np.any(norms <= 1.0e-6):
+            return False
+
+        angles = (np.degrees(np.arctan2(vec[:, 1], vec[:, 0])) + 360.0) % 360.0
+        min_sep = 180.0
+        for i, j in combinations(range(len(angles)), 2):
+            diff = abs(float(angles[i] - angles[j]))
+            diff = min(diff, 360.0 - diff)
+            min_sep = min(min_sep, diff)
+        return bool(min_sep >= float(self.cfg.min_source_angle_separation_deg))
+
+    def _sample_source_inside_secondary_triangle(self, sec_positions: np.ndarray, room_size: np.ndarray) -> np.ndarray:
+        sec_positions = np.asarray(sec_positions, dtype=float)
+        low = np.array(
+            [
+                float(self.cfg.source_wall_margin),
+                float(self.cfg.source_wall_margin),
+                max(float(self.cfg.wall_margin + 0.10), 0.55),
+            ],
+            dtype=float,
+        )
+        high = room_size - low
+
+        for _ in range(80):
+            weights = self.rng.dirichlet(np.full(self.cfg.num_nodes, float(self.cfg.source_barycentric_alpha), dtype=float))
+            xy = weights @ sec_positions[:, :2]
+            z_center = float(weights @ sec_positions[:, 2])
+            z = float(np.clip(z_center + self.rng.uniform(-0.10, 0.10), low[2], high[2]))
+            source_pos = np.array([xy[0], xy[1], z], dtype=float)
+            if np.any(source_pos < low) or np.any(source_pos > high):
+                continue
+            if float(np.min(np.linalg.norm(sec_positions - source_pos, axis=1))) < float(self.cfg.min_source_device_distance + 0.10):
+                continue
+            if not self._source_angle_separation_ok(source_pos, sec_positions):
+                continue
+            return source_pos
+
+        raise QCError("geometry:failed_to_place_source_inside_secondary_triangle")
+
     def _check_neighbor_speaker_causality(
         self,
         ref_positions: np.ndarray,
@@ -502,6 +573,31 @@ class AcousticScenarioSampler:
         direction /= max(float(np.linalg.norm(direction)), 1.0e-9)
         return direction
 
+    def _max_forward_distance_inside_room(
+        self,
+        point: np.ndarray,
+        direction: np.ndarray,
+        room_size: np.ndarray,
+    ) -> float:
+        point = np.asarray(point, dtype=float)
+        direction = np.asarray(direction, dtype=float)
+        low = np.full(3, float(self.cfg.wall_margin), dtype=float)
+        high = np.asarray(room_size, dtype=float) - low
+
+        t_max = float("inf")
+        for dim in range(3):
+            d = float(direction[dim])
+            if abs(d) <= 1.0e-9:
+                continue
+            if d > 0.0:
+                limit = (float(high[dim]) - float(point[dim])) / d
+            else:
+                limit = (float(low[dim]) - float(point[dim])) / d
+            if limit < 0.0:
+                return -1.0
+            t_max = min(t_max, float(limit))
+        return float(t_max)
+
     def _derive_triplets_from_secondary(
         self,
         sec_positions: np.ndarray,
@@ -524,6 +620,58 @@ class AcousticScenarioSampler:
                 return ref_positions, err_positions
 
         raise QCError("geometry:failed_to_place_triplets")
+
+    def _derive_triplets_from_source(
+        self,
+        source_pos: np.ndarray,
+        sec_positions: np.ndarray,
+        room_size: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        source_pos = np.asarray(source_pos, dtype=float)
+        sec_positions = np.asarray(sec_positions, dtype=float)
+
+        for _ in range(40):
+            ref_positions = np.zeros_like(sec_positions, dtype=float)
+            err_positions = np.zeros_like(sec_positions, dtype=float)
+            valid = True
+            for i, sec_pos in enumerate(sec_positions):
+                axis = np.asarray(sec_pos, dtype=float) - source_pos
+                axis_norm = float(np.linalg.norm(axis))
+                if axis_norm <= float(self.cfg.min_source_device_distance + self.cfg.node_ref_to_sec_range[0] + 0.02):
+                    valid = False
+                    break
+
+                direction = axis / axis_norm
+                ref_gap_lo = float(self.cfg.node_ref_to_sec_range[0])
+                ref_gap_hi = min(
+                    float(self.cfg.node_ref_to_sec_range[1]),
+                    axis_norm - float(self.cfg.min_source_device_distance) - 0.02,
+                )
+                if ref_gap_hi <= ref_gap_lo:
+                    valid = False
+                    break
+
+                max_err_gap = self._max_forward_distance_inside_room(sec_pos, direction, room_size) - 0.02
+                err_gap_lo = float(self.cfg.node_err_extra_range[0])
+                err_gap_hi = min(float(self.cfg.node_err_extra_range[1]), float(max_err_gap))
+                if err_gap_hi <= err_gap_lo:
+                    valid = False
+                    break
+
+                ref_gap = float(self.rng.uniform(ref_gap_lo, ref_gap_hi))
+                err_gap = float(self.rng.uniform(err_gap_lo, err_gap_hi))
+                ref_dist = axis_norm - ref_gap
+                if ref_dist <= float(self.cfg.min_source_device_distance):
+                    valid = False
+                    break
+
+                ref_positions[i] = source_pos + direction * ref_dist
+                err_positions[i] = sec_pos + direction * err_gap
+
+            if valid and self._all_inside_room(ref_positions, room_size) and self._all_inside_room(err_positions, room_size):
+                return ref_positions, err_positions
+
+        raise QCError("geometry:failed_to_place_triplets_from_source")
 
     def _sample_source_radial_layout(self, room_size: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         for _ in range(80):
@@ -601,7 +749,7 @@ class AcousticScenarioSampler:
                 if span_high <= span_low:
                     continue
 
-                sec_positions[:, 0] = x_base + self.rng.uniform(-0.08, 0.08, size=self.cfg.num_nodes)
+                sec_positions[:, 0] = x_base + self.rng.uniform(-0.18, 0.18, size=self.cfg.num_nodes)
                 sec_positions[:, 1] = np.sort(self.rng.uniform(span_low, span_high, size=self.cfg.num_nodes))
 
                 if low_side:
@@ -628,7 +776,7 @@ class AcousticScenarioSampler:
                     continue
 
                 sec_positions[:, 0] = np.sort(self.rng.uniform(span_low, span_high, size=self.cfg.num_nodes))
-                sec_positions[:, 1] = y_base + self.rng.uniform(-0.08, 0.08, size=self.cfg.num_nodes)
+                sec_positions[:, 1] = y_base + self.rng.uniform(-0.18, 0.18, size=self.cfg.num_nodes)
 
                 source_x = (float(self.cfg.source_wall_margin), float(room_size[0] - self.cfg.source_wall_margin))
                 if low_side:
@@ -639,9 +787,11 @@ class AcousticScenarioSampler:
             for i in range(self.cfg.num_nodes):
                 sec_positions[i, 2] = self._sample_secondary_height(room_size)
 
-            focus_point = np.asarray(room_size, dtype=float) / 2.0
-            ref_positions, err_positions = self._derive_triplets_from_secondary(sec_positions, focus_point, room_size)
-            source_pos = self._sample_source_in_ranges(room_size, source_x, source_y)
+            if self._triangle_area_xy(sec_positions) < float(self.cfg.min_secondary_triangle_area):
+                continue
+
+            source_pos = self._sample_source_inside_secondary_triangle(sec_positions, room_size)
+            ref_positions, err_positions = self._derive_triplets_from_source(source_pos, sec_positions, room_size)
             return source_pos, ref_positions, sec_positions, err_positions
 
         raise QCError("geometry:failed_wall_strip_layout")
@@ -674,19 +824,11 @@ class AcousticScenarioSampler:
                 sec_positions[i, 1] = base_y + sign_y * float(self.rng.uniform(0.0, span_y))
                 sec_positions[i, 2] = self._sample_secondary_height(room_size)
 
-            focus_point = np.asarray(room_size, dtype=float) / 2.0
-            ref_positions, err_positions = self._derive_triplets_from_secondary(sec_positions, focus_point, room_size)
+            if self._triangle_area_xy(sec_positions) < float(self.cfg.min_secondary_triangle_area):
+                continue
 
-            if x_low:
-                source_x = (max(float(room_size[0] * 0.55), self.cfg.source_wall_margin), float(room_size[0] - self.cfg.source_wall_margin))
-            else:
-                source_x = (float(self.cfg.source_wall_margin), min(float(room_size[0] * 0.45), float(room_size[0] - self.cfg.source_wall_margin)))
-            if y_low:
-                source_y = (max(float(room_size[1] * 0.55), self.cfg.source_wall_margin), float(room_size[1] - self.cfg.source_wall_margin))
-            else:
-                source_y = (float(self.cfg.source_wall_margin), min(float(room_size[1] * 0.45), float(room_size[1] - self.cfg.source_wall_margin)))
-
-            source_pos = self._sample_source_in_ranges(room_size, source_x, source_y)
+            source_pos = self._sample_source_inside_secondary_triangle(sec_positions, room_size)
+            ref_positions, err_positions = self._derive_triplets_from_source(source_pos, sec_positions, room_size)
             return source_pos, ref_positions, sec_positions, err_positions
 
         raise QCError("geometry:failed_corner_cluster_layout")
@@ -713,20 +855,11 @@ class AcousticScenarioSampler:
             if self._min_pairwise_distance(sec_positions) < float(self.cfg.min_secondary_node_distance * 1.05):
                 continue
 
-            centroid = np.mean(sec_positions, axis=0)
-            focus_point = 0.5 * centroid + 0.5 * (np.asarray(room_size, dtype=float) / 2.0)
-            ref_positions, err_positions = self._derive_triplets_from_secondary(sec_positions, focus_point, room_size)
+            if self._triangle_area_xy(sec_positions) < float(self.cfg.min_secondary_triangle_area):
+                continue
 
-            if centroid[0] <= float(room_size[0] / 2.0):
-                source_x = (max(float(room_size[0] * 0.45), self.cfg.source_wall_margin), float(room_size[0] - self.cfg.source_wall_margin))
-            else:
-                source_x = (float(self.cfg.source_wall_margin), min(float(room_size[0] * 0.55), float(room_size[0] - self.cfg.source_wall_margin)))
-            if centroid[1] <= float(room_size[1] / 2.0):
-                source_y = (max(float(room_size[1] * 0.45), self.cfg.source_wall_margin), float(room_size[1] - self.cfg.source_wall_margin))
-            else:
-                source_y = (float(self.cfg.source_wall_margin), min(float(room_size[1] * 0.55), float(room_size[1] - self.cfg.source_wall_margin)))
-
-            source_pos = self._sample_source_in_ranges(room_size, source_x, source_y)
+            source_pos = self._sample_source_inside_secondary_triangle(sec_positions, room_size)
+            ref_positions, err_positions = self._derive_triplets_from_source(source_pos, sec_positions, room_size)
             return source_pos, ref_positions, sec_positions, err_positions
 
         raise QCError("geometry:failed_free_scatter_layout")
@@ -755,6 +888,10 @@ class AcousticScenarioSampler:
                 continue
 
             if self._min_pairwise_distance(sec_positions) < self.cfg.min_secondary_node_distance:
+                continue
+            if self._triangle_area_xy(sec_positions) < float(self.cfg.min_secondary_triangle_area):
+                continue
+            if not self._source_angle_separation_ok(source_pos, sec_positions):
                 continue
 
             all_devices = np.vstack([ref_positions, sec_positions, err_positions])
@@ -984,6 +1121,19 @@ class ANCQualityController:
                 continue
 
             e = np.asarray(results["err_hist"], dtype=float)
+            if e.ndim != 2 or not np.all(np.isfinite(e)):
+                continue
+
+            filter_coeffs = results.get("filter_coeffs", {})
+            filters_are_finite = True
+            for sec_id in sec_ids:
+                w_mat = np.asarray(filter_coeffs.get(int(sec_id), []), dtype=float)
+                if w_mat.ndim != 2 or not np.all(np.isfinite(w_mat)):
+                    filters_are_finite = False
+                    break
+            if not filters_are_finite:
+                continue
+
             metrics = self._nr_metrics(d, e, int(mgr.fs))
 
             passed = metrics["nr_last_db"] >= self.cfg.min_nr_last_db and metrics["nr_gain_db"] >= self.cfg.min_nr_gain_db
@@ -1509,3 +1659,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+'''

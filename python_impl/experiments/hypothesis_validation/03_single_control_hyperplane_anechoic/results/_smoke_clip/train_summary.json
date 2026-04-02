@@ -1,0 +1,14 @@
+{
+  "h5_path": "python_impl/experiments/hypothesis_validation/03_single_control_hyperplane_anechoic/data/_smoke.h5",
+  "feature_kind": "positions",
+  "models": {
+    "hyperplane": {
+      "checkpoint_path": "python_impl\\experiments\\hypothesis_validation\\03_single_control_hyperplane_anechoic\\results\\_smoke_clip\\positions_hyperplane_best.pt",
+      "best_val_loss": 75572813824.0
+    },
+    "w_mse": {
+      "checkpoint_path": "python_impl\\experiments\\hypothesis_validation\\03_single_control_hyperplane_anechoic\\results\\_smoke_clip\\positions_w_mse_best.pt",
+      "best_val_loss": 2.0414113998413086
+    }
+  }
+}

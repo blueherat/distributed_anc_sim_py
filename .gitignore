@@ -1,0 +1,11 @@
+**/__pycache__/
+*.pyc
+.ipynb_checkpoints/
+python_impl/experiments/hypothesis_validation/01_source_localization_anechoic_2d/data/*.h5
+python_impl/experiments/hypothesis_validation/01_source_localization_anechoic_2d/data/*.manifest.json
+python_impl/experiments/hypothesis_validation/01_source_localization_anechoic_2d/results/
+python_impl/experiments/hypothesis_validation/02_source_localization_reflections/data/*.h5
+python_impl/experiments/hypothesis_validation/02_source_localization_reflections/data/*.manifest.json
+python_impl/experiments/hypothesis_validation/02_source_localization_reflections/results/
+python_impl/python_scripts/*.h5
+python_impl/experiments/hypothesis_validation/**/data/*.h5

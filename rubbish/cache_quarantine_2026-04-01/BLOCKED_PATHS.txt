@@ -1,0 +1,22 @@
+The following cache or temporary paths could not be removed or moved from this workspace due to Windows access-denied locks at cleanup time:
+
+python_impl/__pycache__
+python_impl/notebooks/__pycache__
+python_impl/python_scripts/__pycache__
+python_impl/py_anc/__pycache__
+python_impl/py_anc/acoustics/__pycache__
+python_impl/py_anc/algorithms/__pycache__
+python_impl/py_anc/algorithms/nodes/__pycache__
+python_impl/py_anc/scenarios/__pycache__
+python_impl/py_anc/topology/__pycache__
+python_impl/py_anc/utils/__pycache__
+python_impl/py_anc/viz/__pycache__
+python_impl/python_scripts/cfxlms_qc_dataset_cross_smoke.h5
+python_impl/python_scripts/cfxlms_qc_dataset_cross_v2_smoke.h5
+python_impl/python_scripts/_tmp_cfxlms_qc_dataset_geomcheck.h5
+python_impl/python_scripts/_tmp_cfxlms_qc_dataset_geomcheck2.h5
+python_impl/python_scripts/_tmp_cfxlms_qc_dataset_geomcheck3.h5
+python_impl/python_scripts/_tmp_cfxlms_qc_dataset_validation.h5
+python_impl/python_scripts/_tmp_multicontrol_smoke.h5
+python_impl/python_scripts/_tmp_single_control_smoke.h5
+python_impl/python_scripts/_tmp_single_control_smoke2.h5

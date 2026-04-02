@@ -1,0 +1,2 @@
+epoch,train_anchor_exact,train_loss,train_probe_ai_vs_zero_db,train_q_raw_mse,val_anchor_exact,val_probe_ai_to_h5_gap_db,val_probe_ai_vs_zero_db,val_probe_plant_residual,val_q_raw_mse
+1,0.07692307692307693,41.05489906897912,-1.4173311020711097,0.0010369944099623424,0.0,21.954414272196647,-1.2835811835921451,1.6509407271762895,0.0011673980625346303

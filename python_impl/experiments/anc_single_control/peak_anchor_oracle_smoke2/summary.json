@@ -1,0 +1,80 @@
+{
+  "args": {
+    "h5_path": "python_impl/python_scripts/cfxlms_qc_dataset_single_control.h5",
+    "output_dir": "python_impl/experiments/anc_single_control/peak_anchor_oracle_smoke2",
+    "model_kind": "oracle",
+    "epochs": 2,
+    "batch_size": 64,
+    "val_frac": 0.2,
+    "seed": 20260331,
+    "lr": 0.0008,
+    "weight_decay": 0.0001,
+    "dropout": 0.15,
+    "device": "auto",
+    "tail_basis_dim": 8,
+    "local_half_width": 5,
+    "include_s2r": false,
+    "anchor_loss_weight": 0.0,
+    "local_loss_weight": 1.0,
+    "tail_loss_weight": 0.5,
+    "full_loss_weight": 0.25,
+    "anchor_label_smoothing": 0.05,
+    "replay_room_count": 2,
+    "replay_eval_interval": 1,
+    "replay_early_window_s": 0.25
+  },
+  "bundle_meta": {
+    "h5_path": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\python_scripts\\cfxlms_qc_dataset_single_control.h5",
+    "num_refs": 3,
+    "tap_len": 100,
+    "local_half_width": 5,
+    "local_len": 11,
+    "tail_basis_dim": 8,
+    "ref_cov_bins": 129,
+    "rir_len": 512
+  },
+  "train_size": 1600,
+  "val_size": 400,
+  "replay_room_indices": [
+    158,
+    962
+  ],
+  "best_replay_gain_db": -20.32190881117893,
+  "best_replay_gap_db": 45.926520228741445,
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 6854.747626953125,
+      "train_anchor_exact": 1.0,
+      "train_anchor_within_1": 1.0,
+      "train_local_capture": 0.7564175128936768,
+      "train_full_raw_mse": 0.05748705193400383,
+      "val_loss": 632.2016186523438,
+      "val_anchor_exact": 1.0,
+      "val_anchor_within_1": 1.0,
+      "val_local_capture": 0.7754288911819458,
+      "val_full_raw_mse": 0.006013396456837654,
+      "replay_ai_vs_zero_db": -29.57700594954347,
+      "replay_ai_to_h5_gap_db": 55.18161736710598,
+      "lr": 0.0008,
+      "seconds": 7.267387390136719
+    },
+    {
+      "epoch": 2,
+      "train_loss": 2039.348720703125,
+      "train_anchor_exact": 1.0,
+      "train_anchor_within_1": 1.0,
+      "train_local_capture": 0.7564175724983215,
+      "train_full_raw_mse": 0.01782648265361786,
+      "val_loss": 123.85609771728515,
+      "val_anchor_exact": 1.0,
+      "val_anchor_within_1": 1.0,
+      "val_local_capture": 0.7754288911819458,
+      "val_full_raw_mse": 0.0010255769570358098,
+      "replay_ai_vs_zero_db": -20.32190881117893,
+      "replay_ai_to_h5_gap_db": 45.926520228741445,
+      "lr": 0.0008,
+      "seconds": 5.48311448097229
+    }
+  ]
+}

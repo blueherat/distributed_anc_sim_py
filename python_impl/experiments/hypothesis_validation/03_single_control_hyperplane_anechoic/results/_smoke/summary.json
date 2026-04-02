@@ -1,0 +1,51 @@
+{
+  "h5_path": "python_impl/experiments/hypothesis_validation/03_single_control_hyperplane_anechoic/data/_smoke.h5",
+  "feature_kind": "positions",
+  "profile": "anechoic",
+  "models": {
+    "hyperplane": {
+      "val": {
+        "q_residual_mean": 229679.796875,
+        "replay_gain_mean_db": -55.93014592034036,
+        "replay_gain_median_db": -57.300262138520786,
+        "exact_gain_mean_db": 13.532464629758973,
+        "replay_gap_mean_db": 69.46261055009934,
+        "num_rooms": 19
+      },
+      "test": {
+        "q_residual_mean": 146428.34375,
+        "replay_gain_mean_db": -55.822659688801544,
+        "replay_gain_median_db": -56.005521863706626,
+        "exact_gain_mean_db": 3.6887490200503805,
+        "replay_gap_mean_db": 59.51140870885194,
+        "num_rooms": 19
+      }
+    },
+    "w_mse": {
+      "val": {
+        "q_residual_mean": 83548.546875,
+        "replay_gain_mean_db": -48.96699913723505,
+        "replay_gain_median_db": -48.6943388800108,
+        "exact_gain_mean_db": 13.532464629758973,
+        "replay_gap_mean_db": 62.49946376699402,
+        "num_rooms": 19
+      },
+      "test": {
+        "q_residual_mean": 36908.36328125,
+        "replay_gain_mean_db": -48.27791008764049,
+        "replay_gain_median_db": -46.48422925082058,
+        "exact_gain_mean_db": 3.6887490200503805,
+        "replay_gap_mean_db": 51.96665910769089,
+        "num_rooms": 19
+      }
+    }
+  },
+  "exact_upper_bound": {
+    "test_replay_mean_db": 3.6887490200503805
+  },
+  "passed": {
+    "hyperplane_positive_val_replay": false,
+    "hyperplane_beats_w_mse_val": false,
+    "hyperplane_gap_threshold": false
+  }
+}

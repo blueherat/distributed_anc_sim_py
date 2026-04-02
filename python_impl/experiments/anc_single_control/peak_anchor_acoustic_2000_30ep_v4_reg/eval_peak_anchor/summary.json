@@ -1,0 +1,57 @@
+{
+  "checkpoint": "python_impl\\experiments\\anc_single_control\\peak_anchor_acoustic_2000_30ep_v4_reg\\best_replay.pt",
+  "h5_path": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\python_scripts\\cfxlms_qc_dataset_single_control.h5",
+  "model_kind": "acoustic",
+  "include_s2r": false,
+  "train_metrics": {
+    "anchor_exact": 0.8677083333333333,
+    "anchor_within_1": 0.9064583333333334,
+    "anchor_mae": 0.47041666666666665,
+    "local_energy_capture": 0.7380335330963135,
+    "full_raw_mse": 8.60758427734254e-06
+  },
+  "val_metrics": {
+    "anchor_exact": 0.08,
+    "anchor_within_1": 0.22833333333333333,
+    "anchor_mae": 4.150833333333333,
+    "local_energy_capture": 0.5657026171684265,
+    "full_raw_mse": 2.6018842618213966e-05
+  },
+  "replay_summary": {
+    "room_indices": [
+      158,
+      172,
+      486,
+      962
+    ],
+    "ai_vs_zero_db_mean": 3.953973017547611,
+    "h5_vs_zero_db_mean": 26.41651739068194,
+    "ai_to_h5_gap_db_mean": 22.46254437313433,
+    "per_room": [
+      {
+        "ai_vs_zero_db": 5.607002324342941,
+        "h5_vs_zero_db": 26.698075681433984,
+        "ai_to_h5_gap_db": 21.091073357091044,
+        "room_idx": 158
+      },
+      {
+        "ai_vs_zero_db": 3.197555971484272,
+        "h5_vs_zero_db": 28.525595270933408,
+        "ai_to_h5_gap_db": 25.328039299449134,
+        "room_idx": 172
+      },
+      {
+        "ai_vs_zero_db": 4.787787711333138,
+        "h5_vs_zero_db": 25.93125145666933,
+        "ai_to_h5_gap_db": 21.14346374533619,
+        "room_idx": 486
+      },
+      {
+        "ai_vs_zero_db": 2.223546063030092,
+        "h5_vs_zero_db": 24.511147153691045,
+        "ai_to_h5_gap_db": 22.287601090660953,
+        "room_idx": 962
+      }
+    ]
+  }
+}

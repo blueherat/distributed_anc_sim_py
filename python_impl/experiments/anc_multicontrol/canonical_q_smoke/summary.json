@@ -1,0 +1,79 @@
+{
+  "h5_path": "Z:\\anc\\distributed_anc_sim_py\\python_impl\\python_scripts\\_tmp_multicontrol_smoke.h5",
+  "input_variant": "base",
+  "epochs": 2,
+  "elapsed_s": 53.77828049659729,
+  "train_probe_indices": [
+    1
+  ],
+  "val_probe_indices": [
+    0
+  ],
+  "exact_train_probe": {
+    "room_indices": [
+      1
+    ],
+    "ai_vs_zero_db_mean": 6.233865160847486,
+    "exact_vs_zero_db_mean": 6.233856929628699,
+    "h5_vs_zero_db_mean": 25.04954431330973,
+    "ai_to_exact_gap_db_mean": 8.231218787457806e-06,
+    "ai_to_h5_gap_db_mean": 18.815679152462245,
+    "plant_residual_mean": 0.03327704934859444,
+    "per_room": [
+      {
+        "ai_vs_zero_db": 6.233865160847486,
+        "exact_vs_zero_db": 6.233856929628699,
+        "h5_vs_zero_db": 25.04954431330973,
+        "ai_to_exact_gap_db": 8.231218787457806e-06,
+        "ai_to_h5_gap_db": 18.815679152462245,
+        "room_idx": 1,
+        "plant_residual": 0.03327704934859444
+      }
+    ]
+  },
+  "exact_val_probe": {
+    "room_indices": [
+      0
+    ],
+    "ai_vs_zero_db_mean": 4.871479689726796,
+    "exact_vs_zero_db_mean": 4.871630195284508,
+    "h5_vs_zero_db_mean": 20.481208981975698,
+    "ai_to_exact_gap_db_mean": 0.00015050555771267682,
+    "ai_to_h5_gap_db_mean": 15.609729292248904,
+    "plant_residual_mean": 0.11141150486218361,
+    "per_room": [
+      {
+        "ai_vs_zero_db": 4.871479689726796,
+        "exact_vs_zero_db": 4.871630195284508,
+        "h5_vs_zero_db": 20.481208981975698,
+        "ai_to_exact_gap_db": 0.00015050555771267682,
+        "ai_to_h5_gap_db": 15.609729292248904,
+        "room_idx": 0,
+        "plant_residual": 0.11141150486218361
+      }
+    ]
+  },
+  "best_replay_metrics": {
+    "room_indices": [
+      0
+    ],
+    "ai_vs_zero_db_mean": -0.4553191222487607,
+    "exact_vs_zero_db_mean": 4.871630195284508,
+    "h5_vs_zero_db_mean": 20.481208981975698,
+    "ai_to_exact_gap_db_mean": 5.326949317533269,
+    "ai_to_h5_gap_db_mean": 20.93652810422446,
+    "plant_residual_mean": 1.2683246594082611,
+    "per_room": [
+      {
+        "ai_vs_zero_db": -0.4553191222487607,
+        "exact_vs_zero_db": 4.871630195284508,
+        "h5_vs_zero_db": 20.481208981975698,
+        "ai_to_exact_gap_db": 5.326949317533269,
+        "ai_to_h5_gap_db": 20.93652810422446,
+        "room_idx": 0,
+        "plant_residual": 1.2683246594082611
+      }
+    ],
+    "epoch": 2
+  }
+}

@@ -161,6 +161,14 @@ class RIRManager:
             raise KeyError(f"Secondary RIR for path {key} does not exist.")
         return self.secondary_rirs[key]
 
+    def compute_transfer_rirs(self, tx_position: Iterable[float], rx_positions: Iterable[Iterable[float]]) -> np.ndarray:
+        tx = np.asarray(tx_position, dtype=float).reshape(3)
+        rx = np.asarray(rx_positions, dtype=float)
+        if rx.size == 0:
+            return np.zeros((0, 0), dtype=float)
+        rx = rx.reshape(-1, 3)
+        return self._compute_rir(tx, rx)
+
     def calculate_desired_signal(self, source_signal: np.ndarray, n_samples: int) -> np.ndarray:
         key_pri = list(self.primary_speakers.keys())
         key_err = list(self.error_microphones.keys())
