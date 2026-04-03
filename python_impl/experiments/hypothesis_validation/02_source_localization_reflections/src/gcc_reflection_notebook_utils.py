@@ -11,7 +11,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 
 from python_impl.python_scripts.hypothesis_validation_common import (
     estimate_source_position_from_tdoa,
@@ -45,6 +46,18 @@ class GCCReflectionBundle:
     pair_distances_norm: np.ndarray
     pair_distance_mean: np.ndarray
     pair_distance_std: np.ndarray
+    gcc_peak_lag_samples: np.ndarray
+    gcc_peak_lag_norm: np.ndarray
+    ref_positions_flat: np.ndarray
+    ref_positions_flat_norm: np.ndarray
+    ref_position_mean: np.ndarray
+    ref_position_std: np.ndarray
+    pair_plus_peak_features: np.ndarray
+    pair_plus_ref_features: np.ndarray
+    pair_plus_ref_plus_peak_features: np.ndarray
+    pair_lag_bounds: np.ndarray
+    tdoa_lag_samples: np.ndarray
+    tdoa_lag_norm: np.ndarray
     tdoa_seconds: np.ndarray
     target_r: np.ndarray
     target_xy: np.ndarray
@@ -84,6 +97,11 @@ def _standardize(train_values: np.ndarray, values: np.ndarray) -> tuple[np.ndarr
     return norm, mean, std
 
 
+def _pair_lag_bounds(pair_distances: np.ndarray, fs: int, c: float) -> np.ndarray:
+    dist = np.asarray(pair_distances, dtype=np.float32)
+    return (dist / float(c) * float(fs)).astype(np.float32)
+
+
 def _reorder_tdoa_from_h5(lag_triplets: np.ndarray) -> np.ndarray:
     arr = np.asarray(lag_triplets, dtype=np.float32)
     return arr[:, PAIR_REORDER_FROM_H5].astype(np.float32)
@@ -95,7 +113,8 @@ def build_gcc_reflection_bundle(h5_path: str | Path) -> GCCReflectionBundle:
     source_position = np.asarray(data["source_position"], dtype=np.float32)
     pair_dist = _pair_distances(ref_positions)
     target_r = _radii(source_position, ref_positions)
-    tdoa_seconds = (_reorder_tdoa_from_h5(np.asarray(data["true_tdoa"], dtype=np.float32)) / float(cfg.fs)).astype(np.float32)
+    tdoa_lag_samples = _reorder_tdoa_from_h5(np.asarray(data["true_tdoa"], dtype=np.float32)).astype(np.float32)
+    tdoa_seconds = (tdoa_lag_samples / float(cfg.fs)).astype(np.float32)
     gcc_phat = np.asarray(data["gcc_phat"], dtype=np.float32)
     profile_id = np.asarray(data.get("profile_id", np.zeros((ref_positions.shape[0],), dtype=np.int64)), dtype=np.int64)
 
@@ -114,6 +133,18 @@ def build_gcc_reflection_bundle(h5_path: str | Path) -> GCCReflectionBundle:
     split_sizes = {key: int(idx.size) for key, idx in split_indices.items()}
 
     pair_dist_norm, pair_mean, pair_std = _standardize(pair_dist[train_idx], pair_dist)
+    ref_flat = ref_positions.reshape(ref_positions.shape[0], -1).astype(np.float32)
+    ref_flat_norm, ref_mean, ref_std = _standardize(ref_flat[train_idx], ref_flat)
+    lag_bounds = _pair_lag_bounds(pair_dist, fs=int(cfg.fs), c=float(cfg.c))
+    lag_bounds_safe = np.maximum(lag_bounds, 1.0e-6).astype(np.float32)
+    tdoa_lag_norm = np.clip(tdoa_lag_samples / lag_bounds_safe, -1.0, 1.0).astype(np.float32)
+    lag_center = 0.5 * float(int(gcc_phat.shape[-1]) - 1)
+    gcc_peak_idx = np.argmax(gcc_phat, axis=2).astype(np.float32)
+    gcc_peak_lag_samples = (gcc_peak_idx - lag_center).astype(np.float32)
+    gcc_peak_lag_norm = np.clip(gcc_peak_lag_samples / lag_bounds_safe, -1.0, 1.0).astype(np.float32)
+    pair_plus_peak = np.concatenate([pair_dist_norm, gcc_peak_lag_norm], axis=1).astype(np.float32)
+    pair_plus_ref = np.concatenate([pair_dist_norm, ref_flat_norm], axis=1).astype(np.float32)
+    pair_plus_ref_plus_peak = np.concatenate([pair_dist_norm, ref_flat_norm, gcc_peak_lag_norm], axis=1).astype(np.float32)
 
     return GCCReflectionBundle(
         h5_path=str(Path(h5_path)),
@@ -147,6 +178,18 @@ def build_gcc_reflection_bundle(h5_path: str | Path) -> GCCReflectionBundle:
         pair_distances_norm=pair_dist_norm,
         pair_distance_mean=pair_mean,
         pair_distance_std=pair_std,
+        gcc_peak_lag_samples=gcc_peak_lag_samples,
+        gcc_peak_lag_norm=gcc_peak_lag_norm,
+        ref_positions_flat=ref_flat,
+        ref_positions_flat_norm=ref_flat_norm,
+        ref_position_mean=ref_mean,
+        ref_position_std=ref_std,
+        pair_plus_peak_features=pair_plus_peak,
+        pair_plus_ref_features=pair_plus_ref,
+        pair_plus_ref_plus_peak_features=pair_plus_ref_plus_peak,
+        pair_lag_bounds=lag_bounds,
+        tdoa_lag_samples=tdoa_lag_samples,
+        tdoa_lag_norm=tdoa_lag_norm,
         tdoa_seconds=tdoa_seconds,
         target_r=target_r,
         target_xy=source_position,
@@ -163,6 +206,23 @@ def set_global_seed(seed: int) -> None:
     torch.manual_seed(int(seed))
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(int(seed))
+
+
+def _select_aux_features(bundle: GCCReflectionBundle, aux_feature_mode: str) -> tuple[np.ndarray, str]:
+    mode = str(aux_feature_mode).strip().lower()
+    if mode in {"pair_distance_norm", "pair_dist_norm", "pair"}:
+        return np.asarray(bundle.pair_distances_norm, dtype=np.float32), "pair_distance_norm"
+    if mode in {"pair_plus_peak_norm", "pair_plus_peak", "pair_peak", "pair_plus_gcc_peak_norm"}:
+        return np.asarray(bundle.pair_plus_peak_features, dtype=np.float32), "pair_plus_peak_norm"
+    if mode in {"pair_plus_ref_position_norm", "pair_plus_ref", "pair_ref"}:
+        return np.asarray(bundle.pair_plus_ref_features, dtype=np.float32), "pair_plus_ref_position_norm"
+    if mode in {"pair_plus_ref_plus_peak_norm", "pair_ref_peak", "pair_plus_ref_peak"}:
+        return np.asarray(bundle.pair_plus_ref_plus_peak_features, dtype=np.float32), "pair_plus_ref_plus_peak_norm"
+    raise ValueError(f"Unsupported aux_feature_mode: {aux_feature_mode}")
+
+
+def _scaled_width(base: int, width_mult: float) -> int:
+    return int(max(8, round(int(base) * float(width_mult))))
 
 
 class GCCEncoder(nn.Module):
@@ -183,21 +243,90 @@ class GCCEncoder(nn.Module):
         return x.squeeze(-1)
 
 
-class GCCToTDOAModel(nn.Module):
-    def __init__(self, seq_len: int):
+class GCCPositionalEncoder(nn.Module):
+    def __init__(
+        self,
+        seq_len: int,
+        dropout_p: float = 0.10,
+        channels: tuple[int, int, int] = (32, 64, 96),
+        proj_hidden_dim: int = 256,
+        out_dim: int = 128,
+    ):
         super().__init__()
-        self.encoder = GCCEncoder(seq_len)
-        self.head = nn.Sequential(
-            nn.Linear(64 + 3, 128),
+        c1, c2, c3 = (int(channels[0]), int(channels[1]), int(channels[2]))
+        proj_h = int(proj_hidden_dim)
+        out_h = int(out_dim)
+        self.backbone = nn.Sequential(
+            nn.Conv1d(3, c1, kernel_size=9, padding=4),
             nn.GELU(),
-            nn.Linear(128, 64),
+            nn.Conv1d(c1, c2, kernel_size=7, padding=3, stride=2),
             nn.GELU(),
-            nn.Linear(64, 3),
+            nn.Conv1d(c2, c3, kernel_size=5, padding=2, stride=2),
+            nn.GELU(),
+            nn.Conv1d(c3, c3, kernel_size=3, padding=1),
+            nn.GELU(),
         )
+        with torch.no_grad():
+            dummy = torch.zeros(1, 3, int(seq_len), dtype=torch.float32)
+            reduced_len = int(self.backbone(dummy).shape[-1])
+        self.proj = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(c3 * reduced_len, proj_h),
+            nn.GELU(),
+            nn.Dropout(p=float(dropout_p)),
+            nn.Linear(proj_h, out_h),
+            nn.GELU(),
+        )
+        self.out_dim = out_h
 
-    def forward(self, gcc: torch.Tensor, pair_dist: torch.Tensor) -> torch.Tensor:
+    def forward(self, gcc: torch.Tensor) -> torch.Tensor:
+        return self.proj(self.backbone(gcc))
+
+
+class GCCToTDOAModel(nn.Module):
+    def __init__(
+        self,
+        seq_len: int,
+        aux_dim: int = 3,
+        dropout_p: float = 0.10,
+        model_width_mult: float = 1.0,
+    ):
+        super().__init__()
+        width_mult = float(max(model_width_mult, 0.5))
+        enc_channels = (
+            _scaled_width(32, width_mult),
+            _scaled_width(64, width_mult),
+            _scaled_width(96, width_mult),
+        )
+        enc_proj_dim = _scaled_width(256, width_mult)
+        enc_out_dim = _scaled_width(128, width_mult)
+        head_h1 = _scaled_width(128, width_mult)
+        head_h2 = _scaled_width(64, width_mult)
+        self.encoder = GCCPositionalEncoder(
+            seq_len,
+            dropout_p=dropout_p,
+            channels=enc_channels,
+            proj_hidden_dim=enc_proj_dim,
+            out_dim=enc_out_dim,
+        )
+        self.head = nn.Sequential(
+            nn.Linear(enc_out_dim + int(aux_dim), head_h1),
+            nn.GELU(),
+            nn.Linear(head_h1, head_h2),
+            nn.GELU(),
+            nn.Linear(head_h2, 2),
+            nn.Tanh(),
+        )
+        self.output_dim = 2
+        self.model_width_mult = width_mult
+        self.encoder_channels = tuple(int(v) for v in enc_channels)
+        self.encoder_proj_dim = int(enc_proj_dim)
+        self.encoder_out_dim = int(enc_out_dim)
+        self.head_hidden_dims = (int(head_h1), int(head_h2))
+
+    def forward(self, gcc: torch.Tensor, aux_feat: torch.Tensor) -> torch.Tensor:
         feat = self.encoder(gcc)
-        return self.head(torch.cat([feat, pair_dist], dim=1))
+        return self.head(torch.cat([feat, aux_feat], dim=1))
 
 
 class GCCToRelativeDistanceModel(nn.Module):
@@ -212,6 +341,7 @@ class GCCToRelativeDistanceModel(nn.Module):
             nn.Linear(64, 3),
             nn.Softplus(),
         )
+        self.output_dim = 3
 
     def forward(self, gcc: torch.Tensor, pair_dist: torch.Tensor) -> torch.Tensor:
         feat = self.encoder(gcc)
@@ -249,7 +379,72 @@ def _xy_error_stats(pred_xy: np.ndarray, true_xy: np.ndarray) -> dict[str, float
     }
 
 
-def _predict(model: nn.Module, gcc: np.ndarray, pair_dist: np.ndarray, indices: np.ndarray, device: torch.device, batch_size: int = 256) -> np.ndarray:
+def _decode_lag_triplet_from_two_np(pred_two_norm: np.ndarray, lag_bounds: np.ndarray) -> np.ndarray:
+    pred = np.asarray(pred_two_norm, dtype=np.float32)
+    bounds = np.maximum(np.asarray(lag_bounds, dtype=np.float32), 1.0e-6)
+    lag01 = pred[:, 0] * bounds[:, 0]
+    lag12 = pred[:, 1] * bounds[:, 1]
+    lag02 = lag01 + lag12
+    return np.stack([lag01, lag12, lag02], axis=1).astype(np.float32)
+
+
+def _decode_norm_triplet_from_two_np(pred_two_norm: np.ndarray, lag_bounds: np.ndarray) -> np.ndarray:
+    lag_triplet = _decode_lag_triplet_from_two_np(pred_two_norm, lag_bounds)
+    bounds = np.maximum(np.asarray(lag_bounds, dtype=np.float32), 1.0e-6)
+    return (lag_triplet / bounds).astype(np.float32)
+
+
+def _decode_norm_triplet_from_two_torch(pred_two_norm: torch.Tensor, lag_bounds: torch.Tensor) -> torch.Tensor:
+    bounds = torch.clamp(lag_bounds, min=1.0e-6)
+    lag01 = pred_two_norm[:, 0] * bounds[:, 0]
+    lag12 = pred_two_norm[:, 1] * bounds[:, 1]
+    lag02 = lag01 + lag12
+    norm02 = lag02 / bounds[:, 2]
+    return torch.stack([pred_two_norm[:, 0], pred_two_norm[:, 1], norm02], dim=1)
+
+
+def _huber_loss_np(error: np.ndarray, delta: float) -> np.ndarray:
+    abs_err = np.abs(np.asarray(error, dtype=np.float32))
+    quad = np.minimum(abs_err, float(delta)).astype(np.float32)
+    lin = abs_err - quad
+    return 0.5 * (quad**2) + float(delta) * lin
+
+
+def _huber_loss_torch(error: torch.Tensor, delta: float) -> torch.Tensor:
+    abs_err = torch.abs(error)
+    quad = torch.minimum(abs_err, torch.full_like(abs_err, float(delta)))
+    lin = abs_err - quad
+    return 0.5 * (quad**2) + float(delta) * lin
+
+
+def _stage1_epoch_count(total_epochs: int, stage1_ratio: float) -> int:
+    total = max(int(total_epochs), 1)
+    ratio = float(np.clip(float(stage1_ratio), 0.0, 1.0))
+    count = int(round(total * ratio))
+    return int(min(max(count, 1), total))
+
+
+def _curriculum_sample_weights(
+    profile_id: np.ndarray,
+    epoch: int,
+    total_epochs: int,
+    mode: str,
+    stage1_ratio: float,
+    stage1_anechoic_boost: float,
+) -> np.ndarray | None:
+    if str(mode) != "profile_two_stage":
+        return None
+    stage1_epochs = _stage1_epoch_count(total_epochs=total_epochs, stage1_ratio=stage1_ratio)
+    if int(epoch) > int(stage1_epochs):
+        return None
+    boost = float(max(stage1_anechoic_boost, 1.0))
+    weights = np.ones((int(profile_id.size),), dtype=np.float64)
+    # profile_id==0 means anechoic in this dataset; stage1 oversamples easier samples.
+    weights[np.asarray(profile_id, dtype=np.int64) == 0] = boost
+    return weights
+
+
+def _predict(model: nn.Module, gcc: np.ndarray, aux_features: np.ndarray, indices: np.ndarray, device: torch.device, batch_size: int = 256) -> np.ndarray:
     idx = np.asarray(indices, dtype=np.int64)
     outputs: list[np.ndarray] = []
     model.eval()
@@ -257,10 +452,11 @@ def _predict(model: nn.Module, gcc: np.ndarray, pair_dist: np.ndarray, indices: 
         for start in range(0, idx.size, int(batch_size)):
             sl = idx[start : start + int(batch_size)]
             gcc_batch = torch.from_numpy(np.asarray(gcc[sl], dtype=np.float32)).to(device)
-            dist_batch = torch.from_numpy(np.asarray(pair_dist[sl], dtype=np.float32)).to(device)
-            outputs.append(model(gcc_batch, dist_batch).cpu().numpy().astype(np.float32))
+            aux_batch = torch.from_numpy(np.asarray(aux_features[sl], dtype=np.float32)).to(device)
+            outputs.append(model(gcc_batch, aux_batch).cpu().numpy().astype(np.float32))
     if not outputs:
-        return np.zeros((0, 3), dtype=np.float32)
+        out_dim = int(getattr(model, "output_dim", 3))
+        return np.zeros((0, out_dim), dtype=np.float32)
     return np.concatenate(outputs, axis=0).astype(np.float32)
 
 
@@ -357,60 +553,155 @@ def train_gcc_to_tdoa_model(
     seed: int = 0,
     device: str = "cpu",
     live_plot: bool = False,
+    huber_delta_norm: float = 0.05,
+    bound_penalty_weight: float = 0.05,
+    scheduler_patience: int = 4,
+    scheduler_factor: float = 0.5,
+    scheduler_min_lr: float = 1.0e-6,
+    early_stop_patience: int | None = 12,
+    early_stop_min_delta: float = 0.0,
+    curriculum_mode: str = "none",
+    curriculum_stage1_ratio: float = 0.4,
+    curriculum_stage1_anechoic_boost: float = 6.0,
+    aux_feature_mode: str = "pair_distance_norm",
+    dropout_p: float = 0.10,
+    model_width_mult: float = 1.0,
+    init_checkpoint_path: str | Path | None = None,
 ) -> dict[str, Any]:
     result_path = Path(result_dir)
     result_path.mkdir(parents=True, exist_ok=True)
     set_global_seed(int(seed))
     dev = torch.device(device)
-    model = GCCToTDOAModel(seq_len=int(bundle.gcc_phat.shape[-1])).to(dev)
-    optimizer = torch.optim.Adam(model.parameters(), lr=float(lr))
+    huber_delta = float(huber_delta_norm)
+    bound_weight = float(bound_penalty_weight)
+    aux_features, aux_mode = _select_aux_features(bundle, aux_feature_mode)
+    model = GCCToTDOAModel(
+        seq_len=int(bundle.gcc_phat.shape[-1]),
+        aux_dim=int(aux_features.shape[1]),
+        dropout_p=float(dropout_p),
+        model_width_mult=float(model_width_mult),
+    ).to(dev)
+    init_ckpt_resolved: str | None = None
+    if init_checkpoint_path is not None:
+        ckpt_path = Path(init_checkpoint_path).resolve()
+        ckpt = torch.load(ckpt_path, map_location=dev, weights_only=False)
+        try:
+            model.load_state_dict(ckpt["model_state"])
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Failed to load init checkpoint '{ckpt_path}' with aux_feature_mode='{aux_mode}'. "
+                f"Current model_width_mult={float(model_width_mult):.3f}. "
+                "Try aux_feature_mode='pair_distance_norm' or retrain without init_checkpoint_path."
+            ) from exc
+        init_ckpt_resolved = str(ckpt_path)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=float(lr), weight_decay=1.0e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=float(scheduler_factor),
+        patience=max(int(scheduler_patience), 0),
+        min_lr=float(scheduler_min_lr),
+    )
 
     train_idx = bundle.split_indices["train"]
+    train_profile_id = np.asarray(bundle.profile_id[train_idx], dtype=np.int64)
+    curr_mode = str(curriculum_mode).strip().lower()
+    if curr_mode not in {"none", "profile_two_stage"}:
+        raise ValueError(f"Unsupported curriculum_mode: {curriculum_mode}")
     train_ds = TensorDataset(
         torch.from_numpy(np.asarray(bundle.gcc_phat[train_idx], dtype=np.float32)),
-        torch.from_numpy(np.asarray(bundle.pair_distances_norm[train_idx], dtype=np.float32)),
-        torch.from_numpy(np.asarray(bundle.tdoa_seconds[train_idx], dtype=np.float32)),
+        torch.from_numpy(np.asarray(aux_features[train_idx], dtype=np.float32)),
+        torch.from_numpy(np.asarray(bundle.tdoa_lag_norm[train_idx], dtype=np.float32)),
+        torch.from_numpy(np.asarray(bundle.pair_lag_bounds[train_idx], dtype=np.float32)),
     )
-    train_loader = DataLoader(train_ds, batch_size=int(batch_size), shuffle=True, drop_last=False)
+
+    def _build_train_loader(epoch: int) -> DataLoader:
+        sample_weights = _curriculum_sample_weights(
+            profile_id=train_profile_id,
+            epoch=int(epoch),
+            total_epochs=int(epochs),
+            mode=curr_mode,
+            stage1_ratio=float(curriculum_stage1_ratio),
+            stage1_anechoic_boost=float(curriculum_stage1_anechoic_boost),
+        )
+        if sample_weights is None:
+            return DataLoader(train_ds, batch_size=int(batch_size), shuffle=True, drop_last=False)
+        sampler = WeightedRandomSampler(
+            weights=torch.from_numpy(np.asarray(sample_weights, dtype=np.float64)),
+            num_samples=int(train_idx.size),
+            replacement=True,
+        )
+        return DataLoader(train_ds, batch_size=int(batch_size), sampler=sampler, drop_last=False)
+
+    stage1_epochs = _stage1_epoch_count(total_epochs=int(epochs), stage1_ratio=float(curriculum_stage1_ratio))
 
     history: list[dict[str, Any]] = []
     best_selector: tuple[float, float] | None = None
     best_checkpoint_path = result_path / "best_model.pt"
     best_epoch = 0
+    epochs_ran = 0
+    best_geom_for_early_stop: float | None = None
+    no_improve_epochs = 0
+    stop_patience = None if early_stop_patience is None else int(early_stop_patience)
+    if stop_patience is not None and stop_patience <= 0:
+        stop_patience = None
+    stop_min_delta = float(max(0.0, early_stop_min_delta))
 
     def _split_loss_and_mae(split_key: str) -> tuple[float, float]:
         idx = bundle.split_indices[split_key]
-        pred = _predict(model, bundle.gcc_phat, bundle.pair_distances_norm, idx, dev)
-        target = bundle.tdoa_seconds[idx]
-        loss = float(np.mean((pred - target) ** 2))
-        mae = float(np.mean(np.abs(pred - target)))
+        pred_two_norm = _predict(model, bundle.gcc_phat, aux_features, idx, dev)
+        bounds = bundle.pair_lag_bounds[idx]
+        pred_norm = _decode_norm_triplet_from_two_np(pred_two_norm, bounds)
+        target_norm = bundle.tdoa_lag_norm[idx]
+        pred_tdoa = _decode_lag_triplet_from_two_np(pred_two_norm, bounds) / float(bundle.fs)
+        target_tdoa = bundle.tdoa_seconds[idx]
+        loss = float(np.mean(_huber_loss_np(pred_norm - target_norm, huber_delta)))
+        mae = float(np.mean(np.abs(pred_tdoa - target_tdoa)))
         return loss, mae
 
     for epoch in range(1, int(epochs) + 1):
         model.train()
+        train_loader = _build_train_loader(epoch=epoch)
         train_loss_sum = 0.0
+        train_huber_sum = 0.0
+        train_bound_sum = 0.0
         batch_count = 0
-        for gcc_batch, dist_batch, tdoa_batch in train_loader:
+        for gcc_batch, dist_batch, target_norm_batch, lag_bounds_batch in train_loader:
             gcc_batch = gcc_batch.to(dev)
             dist_batch = dist_batch.to(dev)
-            tdoa_batch = tdoa_batch.to(dev)
+            target_norm_batch = target_norm_batch.to(dev)
+            lag_bounds_batch = lag_bounds_batch.to(dev)
             optimizer.zero_grad(set_to_none=True)
-            pred = model(gcc_batch, dist_batch)
-            loss = torch.mean((pred - tdoa_batch) ** 2)
+            pred_two_norm = model(gcc_batch, dist_batch)
+            pred_norm_triplet = _decode_norm_triplet_from_two_torch(pred_two_norm, lag_bounds_batch)
+            huber_term = _huber_loss_torch(pred_norm_triplet - target_norm_batch, huber_delta)
+            loss_huber = torch.mean(huber_term)
+            bound_violation = F.relu(torch.abs(pred_norm_triplet) - 1.0)
+            loss_bound = torch.mean(bound_violation**2)
+            loss = loss_huber + bound_weight * loss_bound
             loss.backward()
             optimizer.step()
             train_loss_sum += float(loss.item())
+            train_huber_sum += float(loss_huber.item())
+            train_bound_sum += float(loss_bound.item())
             batch_count += 1
 
         iid_val_loss, iid_val_mae = _split_loss_and_mae("iid_val")
         geom_val_loss, geom_val_mae = _split_loss_and_mae("geom_val")
+        scheduler.step(float(geom_val_mae))
+        current_lr = float(optimizer.param_groups[0]["lr"])
+        curriculum_stage = "stage1" if (curr_mode == "profile_two_stage" and int(epoch) <= int(stage1_epochs)) else "stage2"
         row = {
             "epoch": int(epoch),
+            "lr": current_lr,
             "train_loss": train_loss_sum / max(batch_count, 1),
+            "train_huber_loss": train_huber_sum / max(batch_count, 1),
+            "train_bound_loss": train_bound_sum / max(batch_count, 1),
             "iid_val_loss": iid_val_loss,
             "geom_val_loss": geom_val_loss,
             "iid_val_tdoa_mae_s": iid_val_mae,
             "geom_val_tdoa_mae_s": geom_val_mae,
+            "curriculum_stage": curriculum_stage,
         }
         history.append(row)
         _maybe_live_plot(history, ["iid_val_tdoa_mae_s", "geom_val_tdoa_mae_s"], ["iid val tdoa mae", "geom val tdoa mae"], bool(live_plot))
@@ -418,7 +709,42 @@ def train_gcc_to_tdoa_model(
         if best_selector is None or selector < best_selector:
             best_selector = selector
             best_epoch = int(epoch)
-            torch.save({"model_state": model.state_dict(), "seed": int(seed)}, best_checkpoint_path)
+            torch.save(
+                {
+                    "model_state": model.state_dict(),
+                    "seed": int(seed),
+                    "target_parameterization": "normalized_lag_samples_2dof_reconstruct_3rd",
+                    "huber_delta_norm": huber_delta,
+                    "bound_penalty_weight": bound_weight,
+                    "scheduler_patience": int(scheduler_patience),
+                    "scheduler_factor": float(scheduler_factor),
+                    "scheduler_min_lr": float(scheduler_min_lr),
+                    "early_stop_patience": stop_patience,
+                    "early_stop_min_delta": float(stop_min_delta),
+                    "curriculum_mode": curr_mode,
+                    "curriculum_stage1_ratio": float(curriculum_stage1_ratio),
+                    "curriculum_stage1_anechoic_boost": float(curriculum_stage1_anechoic_boost),
+                    "aux_feature_mode": aux_mode,
+                    "aux_feature_dim": int(aux_features.shape[1]),
+                    "dropout_p": float(dropout_p),
+                    "model_width_mult": float(model.model_width_mult),
+                    "encoder_channels": list(model.encoder_channels),
+                    "encoder_proj_dim": int(model.encoder_proj_dim),
+                    "encoder_out_dim": int(model.encoder_out_dim),
+                    "head_hidden_dims": list(model.head_hidden_dims),
+                    "init_checkpoint_path": init_ckpt_resolved,
+                },
+                best_checkpoint_path,
+            )
+        geom_metric = float(geom_val_mae)
+        if best_geom_for_early_stop is None or geom_metric < (best_geom_for_early_stop - stop_min_delta):
+            best_geom_for_early_stop = geom_metric
+            no_improve_epochs = 0
+        else:
+            no_improve_epochs += 1
+        epochs_ran = int(epoch)
+        if stop_patience is not None and no_improve_epochs >= stop_patience:
+            break
 
     _write_history_csv(result_path / "train_history.csv", history)
     fig = _plot_history(history, ["iid_val_tdoa_mae_s", "geom_val_tdoa_mae_s"], ["iid val tdoa mae", "geom val tdoa mae"], result_path / "loss_curves.png")
@@ -430,7 +756,30 @@ def train_gcc_to_tdoa_model(
     summary: dict[str, Any] = {
         "h5_path": bundle.h5_path,
         "best_epoch": int(best_epoch),
+        "epochs_requested": int(epochs),
+        "epochs_ran": int(epochs_ran),
         "checkpoint_path": str(best_checkpoint_path),
+        "target_parameterization": "normalized_lag_samples_2dof_reconstruct_3rd",
+        "huber_delta_norm": huber_delta,
+        "bound_penalty_weight": bound_weight,
+        "scheduler_patience": int(scheduler_patience),
+        "scheduler_factor": float(scheduler_factor),
+        "scheduler_min_lr": float(scheduler_min_lr),
+        "early_stop_patience": stop_patience,
+        "early_stop_min_delta": float(stop_min_delta),
+        "curriculum_mode": curr_mode,
+        "curriculum_stage1_ratio": float(curriculum_stage1_ratio),
+        "curriculum_stage1_anechoic_boost": float(curriculum_stage1_anechoic_boost),
+        "curriculum_stage1_epochs": int(stage1_epochs),
+        "aux_feature_mode": aux_mode,
+        "aux_feature_dim": int(aux_features.shape[1]),
+        "dropout_p": float(dropout_p),
+        "model_width_mult": float(model.model_width_mult),
+        "encoder_channels": list(model.encoder_channels),
+        "encoder_proj_dim": int(model.encoder_proj_dim),
+        "encoder_out_dim": int(model.encoder_out_dim),
+        "head_hidden_dims": list(model.head_hidden_dims),
+        "init_checkpoint_path": init_ckpt_resolved,
         "geometry_filter_mode": bundle.geometry_filter_mode,
         "min_triangle_area": float(bundle.min_triangle_area),
         "max_jacobian_condition": float(bundle.max_jacobian_condition),
@@ -445,19 +794,26 @@ def train_gcc_to_tdoa_model(
         "split_sizes": bundle.split_sizes,
         "train_overlap_removed": int(bundle.train_overlap_removed),
     }
-    for split_key in ("iid_test", "geom_test"):
+    for split_key in ("iid_val", "geom_val", "iid_test", "geom_test"):
         idx = bundle.split_indices[split_key]
-        pred_tdoa = _predict(model, bundle.gcc_phat, bundle.pair_distances_norm, idx, dev)
+        pred_two_norm = _predict(model, bundle.gcc_phat, aux_features, idx, dev)
+        bounds = bundle.pair_lag_bounds[idx]
+        pred_lag = _decode_lag_triplet_from_two_np(pred_two_norm, bounds)
+        pred_norm = _decode_norm_triplet_from_two_np(pred_two_norm, bounds)
+        pred_tdoa = pred_lag / float(bundle.fs)
         true_tdoa = bundle.tdoa_seconds[idx]
         pred_xy = _xy_from_tdoa(bundle, pred_tdoa, idx)
         xy_stats = _xy_error_stats(pred_xy, bundle.target_xy[idx])
         summary[split_key] = {
+            "norm_huber_loss": float(np.mean(_huber_loss_np(pred_norm - bundle.tdoa_lag_norm[idx], huber_delta))),
             "tdoa_mse_s2": float(np.mean((pred_tdoa - true_tdoa) ** 2)),
             "tdoa_mae_s": float(np.mean(np.abs(pred_tdoa - true_tdoa))),
             "tdoa_mae_m": float(np.mean(np.abs(pred_tdoa - true_tdoa)) * bundle.c),
+            "consistency_mae_samples": float(np.mean(np.abs(pred_lag[:, 2] - (pred_lag[:, 0] + pred_lag[:, 1])))),
             **xy_stats,
         }
-        _plot_scatter(bundle.target_xy[idx], pred_xy, f"{split_key}: GCC -> TDOA -> XY", result_path / f"scatter_{split_key}.png")
+        if str(split_key).endswith("test"):
+            _plot_scatter(bundle.target_xy[idx], pred_xy, f"{split_key}: GCC -> TDOA -> XY", result_path / f"scatter_{split_key}.png")
     _save_json(result_path / "summary.json", summary)
     return summary
 

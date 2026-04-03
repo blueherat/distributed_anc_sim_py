@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from python_impl.python_scripts.hypothesis_validation_common import (
     load_localization_dataset,
     estimate_tdoa_from_gcc_triplet,
+    localization_geometry_metrics,
 )
 
 
@@ -650,3 +651,204 @@ def train_relative_distance_model(
 
 def load_summary(result_dir: str | Path) -> dict[str, Any]:
     return json.loads((Path(result_dir) / "summary.json").read_text(encoding="utf-8"))
+
+
+def _describe_records(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {
+            "count": 0,
+            "position_error_m_median": None,
+            "position_error_m_p90": None,
+            "position_error_m_mean": None,
+            "tdoa_abs_err_s_median": None,
+            "tdoa_abs_err_s_p90": None,
+            "tdoa_abs_err_s_mean": None,
+            "success_rate": None,
+        }
+    pos = np.asarray([float(row["position_error_m"]) for row in rows], dtype=np.float64)
+    tdoa = np.asarray([float(row["tdoa_abs_err_s"]) for row in rows], dtype=np.float64)
+    success = np.asarray([1.0 if bool(row["success_flag"]) else 0.0 for row in rows], dtype=np.float64)
+    return {
+        "count": int(pos.size),
+        "position_error_m_median": float(np.median(pos)),
+        "position_error_m_p90": float(np.quantile(pos, 0.90)),
+        "position_error_m_mean": float(np.mean(pos)),
+        "tdoa_abs_err_s_median": float(np.median(tdoa)),
+        "tdoa_abs_err_s_p90": float(np.quantile(tdoa, 0.90)),
+        "tdoa_abs_err_s_mean": float(np.mean(tdoa)),
+        "success_rate": float(np.mean(success)),
+    }
+
+
+def _bin_label(left: float, right: float, right_inclusive: bool) -> str:
+    suffix = "]" if right_inclusive else ")"
+    return f"[{left:.3f}, {right:.3f}{suffix}"
+
+
+def _binned_stats(
+    rows: list[dict[str, Any]],
+    metric_key: str,
+    bins: tuple[float, ...],
+) -> list[dict[str, Any]]:
+    if len(bins) < 2:
+        raise ValueError("bins must contain at least two values")
+    out: list[dict[str, Any]] = []
+    for bin_idx in range(len(bins) - 1):
+        left = float(bins[bin_idx])
+        right = float(bins[bin_idx + 1])
+        right_inclusive = bool(bin_idx == len(bins) - 2)
+        if right_inclusive:
+            selected = [
+                row
+                for row in rows
+                if float(row[metric_key]) >= left and float(row[metric_key]) <= right
+            ]
+        else:
+            selected = [
+                row
+                for row in rows
+                if float(row[metric_key]) >= left and float(row[metric_key]) < right
+            ]
+        stats = _describe_records(selected)
+        stats.update(
+            {
+                "metric": str(metric_key),
+                "bin_left": float(left),
+                "bin_right": float(right),
+                "bin_label": _bin_label(left, right, right_inclusive),
+            }
+        )
+        out.append(stats)
+    return out
+
+
+def export_inside_outside_diagnostics(
+    checkpoint_path: str | Path,
+    output_csv: str | Path,
+    output_json: str | Path | None = None,
+    h5_path: str | Path | None = None,
+    use_true_tdoa: bool | None = None,
+    success_threshold_m: float = 0.10,
+    cond_bins: tuple[float, ...] = (0.0, 10.0, 20.0, 30.0, 40.0, 1.0e9),
+    area_bins: tuple[float, ...] = (0.0, 0.15, 0.25, 0.40, 0.70, 10.0),
+    device: str = "cpu",
+) -> dict[str, Any]:
+    ckpt_path = Path(checkpoint_path).resolve()
+    dev = torch.device(device)
+    checkpoint = torch.load(str(ckpt_path), map_location=dev, weights_only=False)
+
+    resolved_h5 = Path(h5_path) if h5_path is not None else Path(str(checkpoint.get("h5_path", "")))
+    if not resolved_h5.exists():
+        raise FileNotFoundError(f"Failed to resolve h5 path: {resolved_h5}")
+    resolved_use_true_tdoa = bool(checkpoint.get("use_true_tdoa", True)) if use_true_tdoa is None else bool(use_true_tdoa)
+    bundle = build_relative_distance_bundle(resolved_h5, use_true_tdoa=resolved_use_true_tdoa)
+
+    model = RelativeDistanceMLP().to(dev)
+    model.load_state_dict(checkpoint["model_state"])
+    model.eval()
+
+    output_csv_path = Path(output_csv)
+    output_csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    all_rows: list[dict[str, Any]] = []
+    split_summaries: dict[str, Any] = {}
+    split_order = ("iid_val", "iid_test", "geom_val", "geom_test")
+    for split_name in split_order:
+        split_indices = np.asarray(bundle.split_indices[split_name], dtype=np.int64)
+        pred_r = _predict_radii(model, bundle.features_norm, split_indices, dev)
+        pred_xy = reconstruct_xy_from_radii(bundle.ref_positions[split_indices], pred_r)
+        true_xy = np.asarray(bundle.target_xy[split_indices], dtype=np.float32)
+        position_error = np.linalg.norm(pred_xy - true_xy, axis=1)
+
+        pred_tdoa_seconds = np.stack(
+            [
+                (pred_r[:, 0] - pred_r[:, 1]) / float(bundle.c),
+                (pred_r[:, 1] - pred_r[:, 2]) / float(bundle.c),
+                (pred_r[:, 0] - pred_r[:, 2]) / float(bundle.c),
+            ],
+            axis=1,
+        ).astype(np.float32)
+        true_tdoa_seconds = np.asarray(bundle.tdoa_seconds[split_indices], dtype=np.float32)
+        tdoa_abs_err_s = np.mean(np.abs(pred_tdoa_seconds - true_tdoa_seconds), axis=1)
+
+        split_rows: list[dict[str, Any]] = []
+        for local_idx, sample_index in enumerate(split_indices.tolist()):
+            tri = np.asarray(bundle.ref_positions[sample_index], dtype=np.float32)
+            src = np.asarray(bundle.target_xy[sample_index], dtype=np.float32)
+            geom = localization_geometry_metrics(src, tri)
+            inside_triangle = bool(float(geom["inside_convex_hull"]) > 0.5)
+            row = {
+                "split": str(split_name),
+                "sample_index": int(sample_index),
+                "position_error_m": float(position_error[local_idx]),
+                "tdoa_abs_err_s": float(tdoa_abs_err_s[local_idx]),
+                "success_flag": bool(float(position_error[local_idx]) <= float(success_threshold_m)),
+                "inside_triangle": bool(inside_triangle),
+                "outside_triangle": bool(not inside_triangle),
+                "triangle_area": float(geom["triangle_area"]),
+                "jacobian_condition": float(geom["jacobian_condition"]),
+                "small_angle_flag": bool(float(geom["small_angle_flag"]) > 0.5),
+                "obtuse_triangle_flag": bool(float(geom["obtuse_triangle_flag"]) > 0.5),
+                "min_source_ref_dist": float(geom["min_source_ref_dist"]),
+                "max_source_ref_dist": float(geom["max_source_ref_dist"]),
+                "centroid_source_dist_norm": float(geom["centroid_source_dist_norm"]),
+            }
+            split_rows.append(row)
+
+        all_rows.extend(split_rows)
+
+        inside_rows = [row for row in split_rows if bool(row["inside_triangle"])]
+        outside_rows = [row for row in split_rows if bool(row["outside_triangle"])]
+        outside_success = [row for row in outside_rows if bool(row["success_flag"])]
+        outside_failure = [row for row in outside_rows if not bool(row["success_flag"])]
+
+        split_summaries[str(split_name)] = {
+            "total": _describe_records(split_rows),
+            "inside": _describe_records(inside_rows),
+            "outside": _describe_records(outside_rows),
+            "outside_success": _describe_records(outside_success),
+            "outside_failure": _describe_records(outside_failure),
+            "outside_success_count": int(len(outside_success)),
+            "outside_failure_count": int(len(outside_failure)),
+            "by_jacobian_condition": _binned_stats(split_rows, "jacobian_condition", cond_bins),
+            "by_triangle_area": _binned_stats(split_rows, "triangle_area", area_bins),
+        }
+
+    fieldnames = [
+        "split",
+        "sample_index",
+        "position_error_m",
+        "tdoa_abs_err_s",
+        "success_flag",
+        "inside_triangle",
+        "outside_triangle",
+        "triangle_area",
+        "jacobian_condition",
+        "small_angle_flag",
+        "obtuse_triangle_flag",
+        "min_source_ref_dist",
+        "max_source_ref_dist",
+        "centroid_source_dist_norm",
+    ]
+    with output_csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in all_rows:
+            writer.writerow(row)
+
+    summary = {
+        "checkpoint_path": str(ckpt_path),
+        "h5_path": str(resolved_h5),
+        "use_true_tdoa": bool(resolved_use_true_tdoa),
+        "success_threshold_m": float(success_threshold_m),
+        "output_csv": str(output_csv_path),
+        "split_order": list(split_order),
+        "cond_bins": [float(v) for v in cond_bins],
+        "area_bins": [float(v) for v in area_bins],
+        "splits": split_summaries,
+    }
+
+    resolved_json_path = Path(output_json) if output_json is not None else output_csv_path.with_suffix(".summary.json")
+    summary["output_json"] = str(resolved_json_path)
+    _save_json(resolved_json_path, summary)
+    return summary
