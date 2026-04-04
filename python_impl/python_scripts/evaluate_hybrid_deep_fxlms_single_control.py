@@ -34,6 +34,7 @@ from python_scripts.train_hybrid_deep_fxlms_single_control import (
     load_bundle,
     resolve_h5_path,
     run_epoch,
+    split_indices_train_val_test,
 )
 
 
@@ -49,6 +50,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--early-window-s", type=float, default=0.25)
     parser.add_argument("--target-metric", choices=("nr_last_db",), default="nr_last_db")
     parser.add_argument("--half-target-ratio", type=float, default=0.5)
+    parser.add_argument("--min-improvement-db", type=float, default=6.0)
+    parser.add_argument("--eval-split", choices=("test", "val", "train", "all"), default="test")
+    parser.add_argument("--disable-improvement-gate", action="store_true")
     parser.add_argument("--disable-half-target-gate", action="store_true")
     return parser.parse_args()
 
@@ -60,13 +64,14 @@ class ReplayCase:
     time_axis: np.ndarray
     reference_signal: np.ndarray
     desired_signal: np.ndarray
+    mu_used: float
 
 
 def build_replay_cases(h5_path: Path, room_indices: list[int]) -> list[ReplayCase]:
     with h5py.File(str(h5_path), "r") as h5:
         cfg = DatasetBuildConfig(**json.loads(h5.attrs["config_json"]))
-        room = h5["raw/room_params"]
         source_seeds = np.asarray(h5["raw/qc_metrics/source_seed"], dtype=np.int64)
+        mu_used = np.asarray(h5["raw/qc_metrics/mu_used"], dtype=np.float64) if "mu_used" in h5["raw/qc_metrics"] else None
 
     sampler = AcousticScenarioSampler(cfg, np.random.default_rng(int(cfg.random_seed)))
     out: list[ReplayCase] = []
@@ -114,6 +119,7 @@ def build_replay_cases(h5_path: Path, room_indices: list[int]) -> list[ReplayCas
                 time_axis=time_axis,
                 reference_signal=reference_signal,
                 desired_signal=desired_signal,
+                mu_used=float(mu_used[int(idx)]) if mu_used is not None else float(cfg.mu_candidates[0]),
             )
         )
     return out
@@ -131,7 +137,7 @@ def predict_w_batch(
     pred_list: list[np.ndarray] = []
     model.eval()
     with torch.no_grad():
-        for gcc, acoustic, p_ref, d_path, s_path, _, _, sample_idx in loader:
+        for gcc, acoustic, p_ref, d_path, s_path, _, _, _, sample_idx in loader:
             out = model(
                 gcc=gcc.to(device=device, dtype=torch.float32),
                 acoustic=acoustic.to(device=device, dtype=torch.float32),
@@ -185,6 +191,7 @@ def warmstart_metrics(
     target_nr_db: np.ndarray | None,
     half_target_ratio: float,
     target_metric: str,
+    min_improvement_db: float = 6.0,
 ) -> dict[str, float]:
     with h5py.File(str(h5_path), "r") as h5:
         cfg = DatasetBuildConfig(**json.loads(h5.attrs["config_json"]))
@@ -195,13 +202,16 @@ def warmstart_metrics(
     init_nr_vals: list[float] = []
     target_vals: list[float] = []
     sample_pass_vals: list[float] = []
+    sample_improvement_pass_vals: list[float] = []
+    sample_6db_pass_vals: list[float] = []
 
     for case_idx, (case, w_i) in enumerate(zip(replay_cases, np.asarray(w_pred, dtype=np.float32))):
+        mu_room = float(case.mu_used)
         params = {
             "time": case.time_axis,
             "rir_manager": case.manager,
             "L": int(cfg.filter_len),
-            "mu": float(cfg.mu_candidates[0]),
+            "mu": mu_room,
             "reference_signal": case.reference_signal,
             "desired_signal": case.desired_signal,
             "verbose": False,
@@ -214,7 +224,7 @@ def warmstart_metrics(
                 case.time_axis,
                 case.manager,
                 int(cfg.filter_len),
-                float(cfg.mu_candidates[0]),
+                mu_room,
                 case.reference_signal,
                 case.desired_signal,
                 w_init=w_i[None, :, :],
@@ -231,7 +241,10 @@ def warmstart_metrics(
         early_mask = t_db <= float(early_window_s)
         if not np.any(early_mask):
             early_mask = np.ones_like(t_db, dtype=bool)
-        gains.append(float(np.mean(db_zero[early_mask] - db_warm[early_mask])))
+        sample_gain = float(np.mean(db_zero[early_mask] - db_warm[early_mask]))
+        gains.append(sample_gain)
+        sample_improvement_pass_vals.append(float(sample_gain >= float(min_improvement_db)))
+        sample_6db_pass_vals.append(float(sample_gain >= 6.0))
 
         desired = np.asarray(case.desired_signal, dtype=float).reshape(-1)
         error = np.asarray(e_warm, dtype=float).reshape(-1)
@@ -267,9 +280,22 @@ def warmstart_metrics(
     )
     half_target_pass = bool(np.isfinite(half_target_gap) and half_target_gap >= 0.0)
 
+    early_gain_mean = float(np.mean(gains)) if gains else float("nan")
+    improvement_gap = (
+        early_gain_mean - float(min_improvement_db)
+        if np.isfinite(early_gain_mean)
+        else float("nan")
+    )
+    improvement_pass = bool(np.isfinite(improvement_gap) and improvement_gap >= 0.0)
+
     return {
-        "early_gain_db_mean": float(np.mean(gains)) if gains else 0.0,
+        "early_gain_db_mean": early_gain_mean,
         "convergence_step_ratio_mean": float(np.mean(step_ratios)) if step_ratios else 0.0,
+        "min_improvement_db": float(min_improvement_db),
+        "improvement_gap_db": improvement_gap,
+        "improvement_pass": improvement_pass,
+        "sample_improvement_pass_rate": float(np.mean(sample_improvement_pass_vals)) if sample_improvement_pass_vals else float("nan"),
+        "sample_6db_pass_rate": float(np.mean(sample_6db_pass_vals)) if sample_6db_pass_vals else float("nan"),
         "init_nr_db_mean": init_nr_mean,
         "target_metric": str(target_metric),
         "target_nr_db_mean": target_nr_mean,
@@ -295,6 +321,12 @@ def main() -> int:
         disable_feature_b=bool(train_args["disable_feature_b"]),
     )
 
+    use_canonical_prior = bool(train_args.get("use_canonical_prior", False))
+    if use_canonical_prior and bundle.w_canon is None:
+        raise RuntimeError(
+            "Checkpoint requires canonical prior, but processed/w_canon is missing in evaluation dataset."
+        )
+
     device = torch.device(
         "cuda" if (str(args.device) == "auto" and torch.cuda.is_available()) else ("cpu" if str(args.device) == "auto" else str(args.device))
     )
@@ -313,6 +345,10 @@ def main() -> int:
         use_index_embedding=bool(train_args.get("use_index_embedding", False)),
         index_direct_lookup=bool(train_args.get("index_direct_lookup", False)),
         num_samples=int(bundle.gcc.shape[0]),
+        use_canonical_prior=use_canonical_prior,
+        canonical_prior_lookup=bundle.w_canon if use_canonical_prior else None,
+        canonical_prior_scale=float(train_args.get("canonical_prior_scale", 1.0)),
+        residual_head_zero_init=bool(train_args.get("residual_head_zero_init", False)),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     loss_module = HybridAcousticLoss(
@@ -322,12 +358,51 @@ def main() -> int:
         nr_margin_focus_ratio=float(train_args.get("nr_margin_focus_ratio", 1.0)),
     ).to(device)
 
+    split_pack = checkpoint.get("split_indices", None)
+
+    def _to_idx_array(x: Any) -> np.ndarray:
+        if x is None:
+            return np.zeros((0,), dtype=np.int64)
+        if isinstance(x, torch.Tensor):
+            x = x.detach().cpu().numpy()
+        return np.asarray(x, dtype=np.int64).reshape(-1)
+
+    if isinstance(split_pack, dict):
+        train_split_idx = _to_idx_array(split_pack.get("train"))
+        val_split_idx = _to_idx_array(split_pack.get("val"))
+        test_split_idx = _to_idx_array(split_pack.get("test"))
+    else:
+        all_indices = np.arange(int(bundle.gcc.shape[0]), dtype=np.int64)
+        val_frac = float(train_args.get("val_frac", 0.2))
+        test_frac = float(train_args.get("test_frac", 0.2))
+        split_seed = int(train_args.get("seed", 20260403))
+        train_split_idx, val_split_idx, test_split_idx = split_indices_train_val_test(
+            indices=all_indices,
+            val_frac=val_frac,
+            test_frac=test_frac,
+            seed=split_seed,
+        )
+
+    eval_split = str(args.eval_split)
+    if eval_split == "train":
+        eval_base_idx = train_split_idx
+    elif eval_split == "val":
+        eval_base_idx = val_split_idx
+    elif eval_split == "test":
+        eval_base_idx = test_split_idx
+    else:
+        eval_base_idx = np.arange(int(bundle.gcc.shape[0]), dtype=np.int64)
+
+    if eval_base_idx.size == 0:
+        raise RuntimeError(f"No samples available for eval-split={eval_split}.")
+
     level_results: dict[str, dict[str, float]] = {}
     fail_reasons: list[str] = []
     all_level_nrs: list[float] = []
 
     for level in (1, 2, 3):
-        idx = np.where(level_mask(bundle.image_order, level))[0].astype(np.int64)
+        level_idx = np.where(level_mask(bundle.image_order, level))[0].astype(np.int64)
+        idx = np.intersect1d(level_idx, eval_base_idx)
         if idx.size < 4:
             level_results[f"level_{level}"] = {"nr_db": float("nan"), "loss_total": float("nan")}
             fail_reasons.append(f"level_{level}:not_enough_samples")
@@ -342,7 +417,8 @@ def main() -> int:
             loss_module=loss_module,
             optimizer=None,
             margin_weight=0.0,
-            wopt_supervision_weight=0.0,
+            supervision_weight=0.0,
+            supervision_source="none",
             acoustic_loss_weight=1.0,
         )
         level_results[f"level_{level}"] = {
@@ -371,7 +447,8 @@ def main() -> int:
         fail_reasons.append("mean_nr_not_above_10db")
 
     warm_level = int(args.warmstart_level)
-    warm_idx = np.where(level_mask(bundle.image_order, warm_level))[0].astype(np.int64)
+    warm_level_idx = np.where(level_mask(bundle.image_order, warm_level))[0].astype(np.int64)
+    warm_idx = np.intersect1d(warm_level_idx, eval_base_idx)
     if warm_idx.size > 0 and int(args.warmstart_cases) > 0:
         probe = warm_idx[: min(int(args.warmstart_cases), warm_idx.size)]
         probe_list = [int(v) for v in probe.tolist()]
@@ -401,11 +478,17 @@ def main() -> int:
             target_nr_db=target_vals,
             half_target_ratio=float(args.half_target_ratio),
             target_metric=str(args.target_metric),
+            min_improvement_db=float(args.min_improvement_db),
         )
     else:
         warm_metrics = {
             "early_gain_db_mean": float("nan"),
             "convergence_step_ratio_mean": float("nan"),
+            "min_improvement_db": float(args.min_improvement_db),
+            "improvement_gap_db": float("nan"),
+            "improvement_pass": False,
+            "sample_improvement_pass_rate": float("nan"),
+            "sample_6db_pass_rate": float("nan"),
             "init_nr_db_mean": float("nan"),
             "target_metric": str(args.target_metric),
             "target_nr_db_mean": float("nan"),
@@ -421,7 +504,26 @@ def main() -> int:
     if np.isfinite(ratio) and ratio < 10.0:
         fail_reasons.append("warmstart_convergence_ratio_below_10x")
 
+    improvement_gate = {
+        "enabled": not bool(args.disable_improvement_gate),
+        "threshold_db": float(args.min_improvement_db),
+        "early_gain_db_mean": float(warm_metrics.get("early_gain_db_mean", float("nan"))),
+        "gap_db": float(warm_metrics.get("improvement_gap_db", float("nan"))),
+        "sample_pass_rate": float(warm_metrics.get("sample_improvement_pass_rate", float("nan"))),
+        "sample_6db_pass_rate": float(warm_metrics.get("sample_6db_pass_rate", float("nan"))),
+        "num_samples": int(warm_metrics.get("num_samples", 0)),
+        "pass": bool(warm_metrics.get("improvement_pass", False)),
+    }
+
+    if bool(improvement_gate["enabled"]):
+        early_gain_mean = float(improvement_gate["early_gain_db_mean"])
+        if not np.isfinite(early_gain_mean):
+            fail_reasons.append("improvement_metric_non_finite")
+        elif not bool(improvement_gate["pass"]):
+            fail_reasons.append("early_gain_below_min_improvement_mean")
+
     half_target_gate = {
+        "legacy": True,
         "enabled": not bool(args.disable_half_target_gate),
         "target_metric": str(args.target_metric),
         "ratio": float(args.half_target_ratio),
@@ -433,14 +535,6 @@ def main() -> int:
         "num_samples": int(warm_metrics.get("num_samples", 0)),
         "pass": bool(warm_metrics.get("half_target_pass", False)),
     }
-
-    if bool(half_target_gate["enabled"]):
-        target_mean = float(half_target_gate["target_nr_db_mean"])
-        init_mean = float(half_target_gate["init_nr_db_mean"])
-        if not (np.isfinite(target_mean) and np.isfinite(init_mean)):
-            fail_reasons.append("half_target_metric_non_finite")
-        elif not bool(half_target_gate["pass"]):
-            fail_reasons.append("init_nr_below_half_target_mean")
 
     gate_status = "passed" if not fail_reasons else "failed"
 
@@ -455,14 +549,26 @@ def main() -> int:
         "use_path_features": bool(train_args.get("use_path_features", False)),
         "use_index_embedding": bool(train_args.get("use_index_embedding", False)),
         "index_direct_lookup": bool(train_args.get("index_direct_lookup", False)),
+        "use_canonical_prior": use_canonical_prior,
+        "canonical_prior_scale": float(train_args.get("canonical_prior_scale", 1.0)),
+        "canonical_residual_l2_weight": float(train_args.get("canonical_residual_l2_weight", 0.0)),
+        "residual_head_zero_init": bool(train_args.get("residual_head_zero_init", False)),
         "lambda_reg": float(train_args.get("lambda_reg", 1.0e-3)),
         "basis_dim": int(train_args.get("basis_dim", 32)),
         "loss_domain": str(train_args.get("loss_domain", "freq")),
+        "eval_split": str(eval_split),
+        "split_sizes": {
+            "train": int(train_split_idx.size),
+            "val": int(val_split_idx.size),
+            "test": int(test_split_idx.size),
+            "eval_base": int(eval_base_idx.size),
+        },
         "gate_status": gate_status,
         "fail_reasons": fail_reasons,
         "level_results": level_results,
         "mean_nr_db": mean_nr,
         "warmstart_metrics": warm_metrics,
+        "improvement_gate": improvement_gate,
         "half_target_gate": half_target_gate,
     }
 

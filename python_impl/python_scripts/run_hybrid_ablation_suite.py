@@ -88,6 +88,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embed-dim", type=int, default=128)
     parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--val-frac", type=float, default=0.2)
+    parser.add_argument("--test-frac", type=float, default=0.2)
     parser.add_argument("--lr", type=float, default=1.0e-3)
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
     parser.add_argument("--grad-clip-norm", type=float, default=5.0)
@@ -97,16 +98,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--nr-margin-mode", choices=("power", "db"), default="power")
     parser.add_argument("--nr-margin-focus-ratio", type=float, default=1.0)
     parser.add_argument("--wopt-supervision-weight", type=float, default=0.0)
+    parser.add_argument("--supervision-weight", type=float, default=None)
+    parser.add_argument("--supervision-source", choices=("none", "w_opt", "w_full"), default="w_opt")
     parser.add_argument("--acoustic-loss-weight", type=float, default=1.0)
     parser.add_argument("--use-path-features", action="store_true")
     parser.add_argument("--use-index-embedding", action="store_true")
     parser.add_argument("--index-direct-lookup", action="store_true")
     parser.add_argument("--index-direct-init-wopt", action="store_true")
+    parser.add_argument("--index-direct-init-source", choices=("none", "w_opt", "w_full"), default="none")
     parser.add_argument("--index-direct-freeze", action="store_true")
+    parser.add_argument("--use-canonical-prior", action="store_true")
+    parser.add_argument("--canonical-prior-scale", type=float, default=1.0)
+    parser.add_argument("--canonical-residual-l2-weight", type=float, default=0.0)
+    parser.add_argument("--residual-head-zero-init", action="store_true")
     parser.add_argument("--warmstart-cases", type=int, default=8)
     parser.add_argument("--warmstart-level", type=int, default=3)
     parser.add_argument("--early-window-s", type=float, default=0.25)
     parser.add_argument("--half-target-ratio", type=float, default=0.5)
+    parser.add_argument("--min-improvement-db", type=float, default=6.0)
+    parser.add_argument("--eval-split", choices=("test", "val", "train", "all"), default="test")
+    parser.add_argument("--disable-improvement-gate", action="store_true")
     parser.add_argument("--disable-half-target-gate", action="store_true")
     parser.add_argument("--eval-only-existing", action="store_true")
     parser.add_argument("--force-rerun-eval", action="store_true")
@@ -151,14 +162,26 @@ def main() -> int:
         "nr_margin_mode": str(args.nr_margin_mode),
         "nr_margin_focus_ratio": float(args.nr_margin_focus_ratio),
         "wopt_supervision_weight": float(args.wopt_supervision_weight),
+        "supervision_source": str(args.supervision_source),
+        "supervision_weight": None if args.supervision_weight is None else float(args.supervision_weight),
         "acoustic_loss_weight": float(args.acoustic_loss_weight),
+        "val_frac": float(args.val_frac),
+        "test_frac": float(args.test_frac),
         "grad_clip_norm": float(args.grad_clip_norm),
         "use_path_features": bool(args.use_path_features),
         "use_index_embedding": bool(args.use_index_embedding),
         "index_direct_lookup": bool(args.index_direct_lookup),
         "index_direct_init_wopt": bool(args.index_direct_init_wopt),
+        "index_direct_init_source": str(args.index_direct_init_source),
         "index_direct_freeze": bool(args.index_direct_freeze),
+        "use_canonical_prior": bool(args.use_canonical_prior),
+        "canonical_prior_scale": float(args.canonical_prior_scale),
+        "canonical_residual_l2_weight": float(args.canonical_residual_l2_weight),
+        "residual_head_zero_init": bool(args.residual_head_zero_init),
+        "eval_split": str(args.eval_split),
         "half_target_ratio": float(args.half_target_ratio),
+        "min_improvement_db": float(args.min_improvement_db),
+        "disable_improvement_gate": bool(args.disable_improvement_gate),
         "disable_half_target_gate": bool(args.disable_half_target_gate),
         "num_configs": len(matrix),
         "configs": [asdict(c) for c in matrix],
@@ -229,7 +252,13 @@ def main() -> int:
                     str(args.early_window_s),
                     "--half-target-ratio",
                     str(args.half_target_ratio),
+                    "--min-improvement-db",
+                    str(args.min_improvement_db),
+                    "--eval-split",
+                    str(args.eval_split),
                 ]
+                if bool(args.disable_improvement_gate):
+                    eval_cmd.append("--disable-improvement-gate")
                 if bool(args.disable_half_target_gate):
                     eval_cmd.append("--disable-half-target-gate")
 
@@ -259,6 +288,8 @@ def main() -> int:
                 str(args.batch_size),
                 "--val-frac",
                 str(args.val_frac),
+                "--test-frac",
+                str(args.test_frac),
                 "--seed",
                 str(seed),
                 "--lr",
@@ -279,6 +310,8 @@ def main() -> int:
                 str(args.nr_margin_focus_ratio),
                 "--wopt-supervision-weight",
                 str(args.wopt_supervision_weight),
+                "--supervision-source",
+                str(args.supervision_source),
                 "--acoustic-loss-weight",
                 str(args.acoustic_loss_weight),
                 "--lambda-reg",
@@ -308,6 +341,8 @@ def main() -> int:
                 "--min-qc-nr-gain-p10-db",
                 str(args.min_qc_nr_gain_p10_db),
             ]
+            if args.supervision_weight is not None:
+                train_cmd.extend(["--supervision-weight", str(args.supervision_weight)])
             if cfg.disable_feature_b:
                 train_cmd.append("--disable-feature-b")
             if bool(args.use_path_features):
@@ -316,10 +351,18 @@ def main() -> int:
                 train_cmd.append("--use-index-embedding")
             if bool(args.index_direct_lookup):
                 train_cmd.append("--index-direct-lookup")
+            if str(args.index_direct_init_source) != "none":
+                train_cmd.extend(["--index-direct-init-source", str(args.index_direct_init_source)])
             if bool(args.index_direct_init_wopt):
                 train_cmd.append("--index-direct-init-wopt")
             if bool(args.index_direct_freeze):
                 train_cmd.append("--index-direct-freeze")
+            if bool(args.use_canonical_prior):
+                train_cmd.append("--use-canonical-prior")
+            train_cmd.extend(["--canonical-prior-scale", str(args.canonical_prior_scale)])
+            train_cmd.extend(["--canonical-residual-l2-weight", str(args.canonical_residual_l2_weight)])
+            if bool(args.residual_head_zero_init):
+                train_cmd.append("--residual-head-zero-init")
             if int(args.max_train_samples) > 0:
                 train_cmd.extend(["--max-train-samples", str(args.max_train_samples)])
 
@@ -361,7 +404,13 @@ def main() -> int:
                 str(args.early_window_s),
                 "--half-target-ratio",
                 str(args.half_target_ratio),
+                "--min-improvement-db",
+                str(args.min_improvement_db),
+                "--eval-split",
+                str(args.eval_split),
             ]
+            if bool(args.disable_improvement_gate):
+                eval_cmd.append("--disable-improvement-gate")
             if bool(args.disable_half_target_gate):
                 eval_cmd.append("--disable-half-target-gate")
             print(f"[EVAL] {cfg.name} seed={seed}")

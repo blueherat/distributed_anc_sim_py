@@ -97,6 +97,7 @@ def collect_seed_rows(results_root: Path) -> list[dict[str, Any]]:
 
             if eval_summary.exists():
                 ev = read_json(eval_summary)
+                imp_gate = ev.get("improvement_gate") or {}
                 half_gate = ev.get("half_target_gate") or {}
                 row.update(
                     {
@@ -110,6 +111,23 @@ def collect_seed_rows(results_root: Path) -> list[dict[str, Any]]:
                         ),
                         "warmstart_init_nr_db_mean": safe_float(
                             (ev.get("warmstart_metrics") or {}).get("init_nr_db_mean", float("nan"))
+                        ),
+                        "improvement_pass": safe_bool(imp_gate.get("pass", False)),
+                        "improvement_enabled": safe_bool(imp_gate.get("enabled", False)),
+                        "improvement_gap_db": safe_float(
+                            imp_gate.get("gap_db", (ev.get("warmstart_metrics") or {}).get("improvement_gap_db", float("nan")))
+                        ),
+                        "improvement_threshold_db": safe_float(
+                            imp_gate.get("threshold_db", (ev.get("warmstart_metrics") or {}).get("min_improvement_db", float("nan")))
+                        ),
+                        "improvement_early_gain_db_mean": safe_float(
+                            imp_gate.get("early_gain_db_mean", (ev.get("warmstart_metrics") or {}).get("early_gain_db_mean", float("nan")))
+                        ),
+                        "improvement_sample_pass_rate": safe_float(
+                            imp_gate.get("sample_pass_rate", (ev.get("warmstart_metrics") or {}).get("sample_improvement_pass_rate", float("nan")))
+                        ),
+                        "sample_6db_pass_rate": safe_float(
+                            imp_gate.get("sample_6db_pass_rate", (ev.get("warmstart_metrics") or {}).get("sample_6db_pass_rate", float("nan")))
                         ),
                         "half_target_pass": safe_bool(half_gate.get("pass", False)),
                         "half_target_enabled": safe_bool(half_gate.get("enabled", False)),
@@ -127,6 +145,7 @@ def collect_seed_rows(results_root: Path) -> list[dict[str, Any]]:
                     row[f"{level_key}_nr_db"] = safe_float(lv.get("nr_db", float("nan")))
             else:
                 row["gate_status"] = "missing_eval"
+                row["improvement_pass"] = False
                 row["half_target_pass"] = False
                 row["fail_reasons"] = ["missing_eval_summary"]
 
@@ -142,11 +161,17 @@ def aggregate_by_config(seed_rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     out: list[dict[str, Any]] = []
     for cfg, rows in sorted(by_cfg.items()):
         gate_pass = sum(1 for r in rows if str(r.get("gate_status", "")) == "passed")
+        improvement_pass = sum(1 for r in rows if safe_bool(r.get("improvement_pass", False)))
         half_target_pass = sum(1 for r in rows if safe_bool(r.get("half_target_pass", False)))
         n = len(rows)
 
         mean_nr_vals = [safe_float(r.get("mean_nr_db", float("nan"))) for r in rows]
         ws_ratio_vals = [safe_float(r.get("warmstart_ratio", float("nan"))) for r in rows]
+        imp_gap_vals = [safe_float(r.get("improvement_gap_db", float("nan"))) for r in rows]
+        imp_early_gain_vals = [safe_float(r.get("improvement_early_gain_db_mean", float("nan"))) for r in rows]
+        imp_sample_pass_vals = [safe_float(r.get("improvement_sample_pass_rate", float("nan"))) for r in rows]
+        sample_6db_pass_vals = [safe_float(r.get("sample_6db_pass_rate", float("nan"))) for r in rows]
+        imp_threshold_vals = [safe_float(r.get("improvement_threshold_db", float("nan"))) for r in rows]
         half_target_gap_vals = [safe_float(r.get("half_target_gap_db", float("nan"))) for r in rows]
         init_nr_vals = [safe_float(r.get("half_target_init_nr_db_mean", float("nan"))) for r in rows]
         target_nr_vals = [safe_float(r.get("half_target_target_nr_db_mean", float("nan"))) for r in rows]
@@ -160,6 +185,11 @@ def aggregate_by_config(seed_rows: list[dict[str, Any]]) -> list[dict[str, Any]]
 
         mean_nr_m, mean_nr_s = mean_std(finite_list(mean_nr_vals))
         ws_m, ws_s = mean_std(finite_list(ws_ratio_vals))
+        imp_gap_m, imp_gap_s = mean_std(finite_list(imp_gap_vals))
+        imp_early_gain_m, imp_early_gain_s = mean_std(finite_list(imp_early_gain_vals))
+        imp_sample_pass_m, _ = mean_std(finite_list(imp_sample_pass_vals))
+        sample_6db_pass_m, _ = mean_std(finite_list(sample_6db_pass_vals))
+        imp_threshold_m, _ = mean_std(finite_list(imp_threshold_vals))
         half_gap_m, half_gap_s = mean_std(finite_list(half_target_gap_vals))
         init_nr_m, _ = mean_std(finite_list(init_nr_vals))
         target_nr_m, _ = mean_std(finite_list(target_nr_vals))
@@ -184,6 +214,16 @@ def aggregate_by_config(seed_rows: list[dict[str, Any]]) -> list[dict[str, Any]]
                 "num_seeds": n,
                 "gate_pass_count": gate_pass,
                 "gate_pass_rate": float(gate_pass / n) if n > 0 else float("nan"),
+                "improvement_enabled": safe_bool(sample.get("improvement_enabled", False)),
+                "improvement_threshold_db": imp_threshold_m,
+                "improvement_pass_count": improvement_pass,
+                "improvement_pass_rate": float(improvement_pass / n) if n > 0 else float("nan"),
+                "improvement_gap_db_mean": imp_gap_m,
+                "improvement_gap_db_std": imp_gap_s,
+                "improvement_early_gain_db_mean": imp_early_gain_m,
+                "improvement_early_gain_db_std": imp_early_gain_s,
+                "improvement_sample_pass_rate_mean": imp_sample_pass_m,
+                "sample_6db_pass_rate_mean": sample_6db_pass_m,
                 "half_target_pass_count": half_target_pass,
                 "half_target_pass_rate": float(half_target_pass / n) if n > 0 else float("nan"),
                 "half_target_gap_db_mean": half_gap_m,
@@ -213,6 +253,9 @@ def aggregate_by_config(seed_rows: list[dict[str, Any]]) -> list[dict[str, Any]]
 
     out.sort(
         key=lambda r: (
+            _sortable(r.get("improvement_pass_rate", float("-inf"))),
+            _sortable(r.get("improvement_gap_db_mean", float("-inf"))),
+            _sortable(r.get("improvement_sample_pass_rate_mean", float("-inf"))),
             _sortable(r.get("half_target_pass_rate", float("-inf"))),
             _sortable(r.get("gate_pass_rate", float("-inf"))),
             _sortable(r.get("mean_nr_db_mean", float("-inf"))),

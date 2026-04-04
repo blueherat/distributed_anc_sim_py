@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--embed-dim", type=int, default=128)
     parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--val-frac", type=float, default=0.2)
+    parser.add_argument("--test-frac", type=float, default=0.2)
     parser.add_argument("--lr", type=float, default=1.0e-3)
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
     parser.add_argument("--nr-margin-weight", type=float, default=0.0)
@@ -50,10 +51,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--nr-margin-mode", choices=("power", "db"), default="power")
     parser.add_argument("--nr-margin-focus-ratio", type=float, default=1.0)
     parser.add_argument("--wopt-supervision-weight", type=float, default=0.0)
+    parser.add_argument("--supervision-weight", type=float, default=None)
+    parser.add_argument("--supervision-source", choices=("none", "w_opt", "w_full"), default="w_opt")
+    parser.add_argument("--use-canonical-prior", action="store_true")
+    parser.add_argument("--canonical-prior-scale", type=float, default=1.0)
+    parser.add_argument("--canonical-residual-l2-weight", type=float, default=0.0)
+    parser.add_argument("--residual-head-zero-init", action="store_true")
     parser.add_argument("--warmstart-cases", type=int, default=8)
     parser.add_argument("--warmstart-level", type=int, default=3)
     parser.add_argument("--early-window-s", type=float, default=0.25)
     parser.add_argument("--half-target-ratio", type=float, default=0.5)
+    parser.add_argument("--min-improvement-db", type=float, default=6.0)
+    parser.add_argument("--eval-split", choices=("test", "val", "train", "all"), default="test")
+    parser.add_argument("--disable-improvement-gate", action="store_true")
 
     parser.add_argument("--min-level1-samples", type=int, default=128)
     parser.add_argument("--min-level23-samples", type=int, default=512)
@@ -90,6 +100,7 @@ def run_suite(
     embed_dim: int,
     num_heads: int,
     val_frac: float,
+    test_frac: float,
     lr: float,
     weight_decay: float,
     nr_margin_weight: float,
@@ -98,10 +109,19 @@ def run_suite(
     nr_margin_mode: str,
     nr_margin_focus_ratio: float,
     wopt_supervision_weight: float,
+    supervision_weight: float | None,
+    supervision_source: str,
+    use_canonical_prior: bool,
+    canonical_prior_scale: float,
+    canonical_residual_l2_weight: float,
+    residual_head_zero_init: bool,
     warmstart_cases: int,
     warmstart_level: int,
     early_window_s: float,
     half_target_ratio: float,
+    min_improvement_db: float,
+    eval_split: str,
+    disable_improvement_gate: bool,
     min_level1_samples: int,
     min_level23_samples: int,
     min_qc_nr_last_p10_db: float,
@@ -133,6 +153,8 @@ def run_suite(
         str(num_heads),
         "--val-frac",
         str(val_frac),
+        "--test-frac",
+        str(test_frac),
         "--lr",
         str(lr),
         "--weight-decay",
@@ -149,6 +171,12 @@ def run_suite(
         str(nr_margin_focus_ratio),
         "--wopt-supervision-weight",
         str(wopt_supervision_weight),
+        "--supervision-source",
+        str(supervision_source),
+        "--canonical-prior-scale",
+        str(canonical_prior_scale),
+        "--canonical-residual-l2-weight",
+        str(canonical_residual_l2_weight),
         "--warmstart-cases",
         str(warmstart_cases),
         "--warmstart-level",
@@ -157,6 +185,10 @@ def run_suite(
         str(early_window_s),
         "--half-target-ratio",
         str(half_target_ratio),
+        "--min-improvement-db",
+        str(min_improvement_db),
+        "--eval-split",
+        str(eval_split),
         "--min-level1-samples",
         str(min_level1_samples),
         "--min-level23-samples",
@@ -166,6 +198,14 @@ def run_suite(
         "--min-qc-nr-gain-p10-db",
         str(min_qc_nr_gain_p10_db),
     ]
+    if bool(disable_improvement_gate):
+        cmd.append("--disable-improvement-gate")
+    if bool(use_canonical_prior):
+        cmd.append("--use-canonical-prior")
+    if bool(residual_head_zero_init):
+        cmd.append("--residual-head-zero-init")
+    if supervision_weight is not None:
+        cmd.extend(["--supervision-weight", str(supervision_weight)])
     if h5_path:
         cmd.extend(["--h5-path", str(h5_path)])
     if max_train_samples > 0:
@@ -235,6 +275,7 @@ def main() -> int:
         embed_dim=int(args.embed_dim),
         num_heads=int(args.num_heads),
         val_frac=float(args.val_frac),
+        test_frac=float(args.test_frac),
         lr=float(args.lr),
         weight_decay=float(args.weight_decay),
         nr_margin_weight=float(args.nr_margin_weight),
@@ -243,10 +284,19 @@ def main() -> int:
         nr_margin_mode=str(args.nr_margin_mode),
         nr_margin_focus_ratio=float(args.nr_margin_focus_ratio),
         wopt_supervision_weight=float(args.wopt_supervision_weight),
+        supervision_weight=None if args.supervision_weight is None else float(args.supervision_weight),
+        supervision_source=str(args.supervision_source),
+        use_canonical_prior=bool(args.use_canonical_prior),
+        canonical_prior_scale=float(args.canonical_prior_scale),
+        canonical_residual_l2_weight=float(args.canonical_residual_l2_weight),
+        residual_head_zero_init=bool(args.residual_head_zero_init),
         warmstart_cases=int(args.warmstart_cases),
         warmstart_level=int(args.warmstart_level),
         early_window_s=float(args.early_window_s),
         half_target_ratio=float(args.half_target_ratio),
+        min_improvement_db=float(args.min_improvement_db),
+        eval_split=str(args.eval_split),
+        disable_improvement_gate=bool(args.disable_improvement_gate),
         min_level1_samples=int(args.min_level1_samples),
         min_level23_samples=int(args.min_level23_samples),
         min_qc_nr_last_p10_db=float(args.min_qc_nr_last_p10_db),
@@ -292,6 +342,7 @@ def main() -> int:
         embed_dim=int(args.embed_dim),
         num_heads=int(args.num_heads),
         val_frac=float(args.val_frac),
+        test_frac=float(args.test_frac),
         lr=float(args.lr),
         weight_decay=float(args.weight_decay),
         nr_margin_weight=float(args.nr_margin_weight),
@@ -300,10 +351,19 @@ def main() -> int:
         nr_margin_mode=str(args.nr_margin_mode),
         nr_margin_focus_ratio=float(args.nr_margin_focus_ratio),
         wopt_supervision_weight=float(args.wopt_supervision_weight),
+        supervision_weight=None if args.supervision_weight is None else float(args.supervision_weight),
+        supervision_source=str(args.supervision_source),
+        use_canonical_prior=bool(args.use_canonical_prior),
+        canonical_prior_scale=float(args.canonical_prior_scale),
+        canonical_residual_l2_weight=float(args.canonical_residual_l2_weight),
+        residual_head_zero_init=bool(args.residual_head_zero_init),
         warmstart_cases=int(args.warmstart_cases),
         warmstart_level=int(args.warmstart_level),
         early_window_s=float(args.early_window_s),
         half_target_ratio=float(args.half_target_ratio),
+        min_improvement_db=float(args.min_improvement_db),
+        eval_split=str(args.eval_split),
+        disable_improvement_gate=bool(args.disable_improvement_gate),
         min_level1_samples=int(args.min_level1_samples),
         min_level23_samples=int(args.min_level23_samples),
         min_qc_nr_last_p10_db=float(args.min_qc_nr_last_p10_db),
@@ -349,6 +409,7 @@ def main() -> int:
         embed_dim=int(args.embed_dim),
         num_heads=int(args.num_heads),
         val_frac=float(args.val_frac),
+        test_frac=float(args.test_frac),
         lr=float(args.lr),
         weight_decay=float(args.weight_decay),
         nr_margin_weight=float(args.nr_margin_weight),
@@ -357,10 +418,19 @@ def main() -> int:
         nr_margin_mode=str(args.nr_margin_mode),
         nr_margin_focus_ratio=float(args.nr_margin_focus_ratio),
         wopt_supervision_weight=float(args.wopt_supervision_weight),
+        supervision_weight=None if args.supervision_weight is None else float(args.supervision_weight),
+        supervision_source=str(args.supervision_source),
+        use_canonical_prior=bool(args.use_canonical_prior),
+        canonical_prior_scale=float(args.canonical_prior_scale),
+        canonical_residual_l2_weight=float(args.canonical_residual_l2_weight),
+        residual_head_zero_init=bool(args.residual_head_zero_init),
         warmstart_cases=int(args.warmstart_cases),
         warmstart_level=int(args.warmstart_level),
         early_window_s=float(args.early_window_s),
         half_target_ratio=float(args.half_target_ratio),
+        min_improvement_db=float(args.min_improvement_db),
+        eval_split=str(args.eval_split),
+        disable_improvement_gate=bool(args.disable_improvement_gate),
         min_level1_samples=int(args.min_level1_samples),
         min_level23_samples=int(args.min_level23_samples),
         min_qc_nr_last_p10_db=float(args.min_qc_nr_last_p10_db),
