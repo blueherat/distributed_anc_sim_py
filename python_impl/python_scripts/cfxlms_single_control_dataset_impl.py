@@ -41,19 +41,20 @@ class DatasetBuildConfig:
     warmup_start_s_max: float = 2.0
 
     room_size_min: float = 3.0
-    room_size_max: float = 6.0
+    room_size_max: float = 5.0
     wall_margin: float = 0.25
     source_wall_margin: float = 0.85
 
     sound_speed_min: float = 338.0
     sound_speed_max: float = 346.0
     reflection_room_probability: float = 0.55
-    direct_room_absorption_range: tuple[float, float] = (0.68, 0.88)
-    reflection_room_absorption_range: tuple[float, float] = (0.30, 0.58)
+    direct_room_absorption_range: tuple[float, float] = (0.22, 0.32)
+    reflection_room_absorption_range: tuple[float, float] = (0.20, 0.30)
     direct_room_image_order_choices: tuple[int, ...] = (0, 1)
     direct_room_image_order_probs: tuple[float, ...] = (0.25, 0.75)
     reflection_room_image_order_choices: tuple[int, ...] = (1, 2)
     reflection_room_image_order_probs: tuple[float, ...] = (0.80, 0.20)
+    enable_air_absorption: bool = True
 
     num_reference_mics: int = 3
     num_secondary_speakers: int = 1
@@ -65,6 +66,18 @@ class DatasetBuildConfig:
     min_reference_device_distance: float = 0.35
     min_primary_advance_margin_m: float = 0.35
     min_secondary_feedback_margin_m: float = 0.08
+    min_noise_source_ref_center_distance: float = 0.50
+
+    ref_center_jitter_xy: float = 0.45
+    ref_center_height_range: tuple[float, float] = (1.05, 1.70)
+    ref_triangle_min_angle_deg: float = 26.0
+    ref_triangle_max_angle_deg: float = 88.0
+    sec_center_distance_range: tuple[float, float] = (0.90, 1.70)
+    err_center_distance_range: tuple[float, float] = (1.15, 2.20)
+    min_err_sec_gap: float = 0.12
+    collinearity_max_sine: float = 0.08
+    line_to_ref_min_distance: float = 0.18
+    triangle_outside_margin: float = 0.04
 
     layout_mode_choices: tuple[str, ...] = ("free_far", "wall_side", "corner_far")
     layout_mode_probs: tuple[float, ...] = (0.45, 0.30, 0.25)
@@ -91,7 +104,13 @@ class DatasetBuildConfig:
 
     rir_store_len: int = 512
     gcc_truncated_len: int = 129
+    gcc_delay_padding: int = 5
+    gcc_use_geometry_window: bool = True
     psd_nfft: int = 256
+
+    acoustic_feature_nfft: int = 512
+    acoustic_feature_low_hz: float = 0.0
+    acoustic_feature_high_hz: float = 1000.0
 
     truncate_energy_ratio: float = 0.90
     truncate_length_quantile: float = 0.95
@@ -162,6 +181,66 @@ def _min_pairwise_distance(points: np.ndarray) -> float:
         for j in range(i + 1, pts.shape[0]):
             min_dist = min(min_dist, float(np.linalg.norm(pts[i] - pts[j])))
     return min_dist
+
+
+def _triangle_angles_deg(points: np.ndarray) -> np.ndarray:
+    pts = np.asarray(points, dtype=float).reshape(3, 3)
+    out = np.zeros((3,), dtype=float)
+    for i in range(3):
+        a = pts[(i + 1) % 3] - pts[i]
+        b = pts[(i + 2) % 3] - pts[i]
+        denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+        if denom <= np.finfo(float).eps:
+            out[i] = 180.0
+            continue
+        cosine = float(np.dot(a, b) / denom)
+        cosine = float(np.clip(cosine, -1.0, 1.0))
+        out[i] = float(np.degrees(np.arccos(cosine)))
+    return out
+
+
+def _point_in_triangle_xy(point: np.ndarray, triangle: np.ndarray) -> bool:
+    p = np.asarray(point, dtype=float).reshape(2)
+    tri = np.asarray(triangle, dtype=float).reshape(3, 2)
+    a = tri[0]
+    b = tri[1]
+    c = tri[2]
+    v0 = c - a
+    v1 = b - a
+    v2 = p - a
+    den = float(v0[0] * v1[1] - v1[0] * v0[1])
+    if abs(den) <= np.finfo(float).eps:
+        return False
+    inv_den = 1.0 / den
+    u = float((v2[0] * v1[1] - v1[0] * v2[1]) * inv_den)
+    v = float((v0[0] * v2[1] - v2[0] * v0[1]) * inv_den)
+    return bool(u >= 0.0 and v >= 0.0 and (u + v) <= 1.0)
+
+
+def _point_to_segment_distance_xy(point: np.ndarray, seg_a: np.ndarray, seg_b: np.ndarray) -> float:
+    p = np.asarray(point, dtype=float).reshape(2)
+    a = np.asarray(seg_a, dtype=float).reshape(2)
+    b = np.asarray(seg_b, dtype=float).reshape(2)
+    ab = b - a
+    denom = float(np.dot(ab, ab))
+    if denom <= np.finfo(float).eps:
+        return float(np.linalg.norm(p - a))
+    t = float(np.dot(p - a, ab) / denom)
+    t = float(np.clip(t, 0.0, 1.0))
+    proj = a + t * ab
+    return float(np.linalg.norm(p - proj))
+
+
+def _point_to_line_distance(point: np.ndarray, line_a: np.ndarray, line_b: np.ndarray) -> float:
+    p = np.asarray(point, dtype=float).reshape(3)
+    a = np.asarray(line_a, dtype=float).reshape(3)
+    b = np.asarray(line_b, dtype=float).reshape(3)
+    ab = b - a
+    norm_ab = float(np.linalg.norm(ab))
+    if norm_ab <= np.finfo(float).eps:
+        return float(np.linalg.norm(p - a))
+    cross = np.cross(p - a, ab)
+    return float(np.linalg.norm(cross) / norm_ab)
 
 
 def _crop_rir(rir: np.ndarray, keep_len: int) -> tuple[np.ndarray, int]:
@@ -422,6 +501,13 @@ class FeatureProcessor:
     def __init__(self, cfg: DatasetBuildConfig):
         self.cfg = cfg
         self.pairs = [(0, 1), (0, 2), (1, 2)]
+        self.acoustic_nfft = int(cfg.acoustic_feature_nfft)
+        self.acoustic_freq = np.fft.rfftfreq(self.acoustic_nfft, d=1.0 / float(cfg.fs))
+        self.acoustic_mask = (self.acoustic_freq >= float(cfg.acoustic_feature_low_hz)) & (
+            self.acoustic_freq <= float(cfg.acoustic_feature_high_hz)
+        )
+        if not np.any(self.acoustic_mask):
+            raise ValueError("acoustic feature mask is empty. Please adjust acoustic_feature_low_hz/high_hz.")
 
     @staticmethod
     def _next_pow2(n: int) -> int:
@@ -442,7 +528,18 @@ class FeatureProcessor:
             return x[mid - half : mid + half + 1]
         return x[mid - half : mid + half]
 
-    def gcc_phat_pair(self, sig_a: np.ndarray, sig_b: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def _resolve_max_delay_samples(
+        ref_a: np.ndarray,
+        ref_b: np.ndarray,
+        sound_speed: float,
+        fs: int,
+    ) -> int:
+        dist = float(np.linalg.norm(np.asarray(ref_a, dtype=float) - np.asarray(ref_b, dtype=float)))
+        delay_s = dist / max(float(sound_speed), 1.0e-6)
+        return int(np.ceil(delay_s * float(fs)))
+
+    def gcc_phat_pair(self, sig_a: np.ndarray, sig_b: np.ndarray, max_delay_samples: int | None = None) -> np.ndarray:
         n = int(sig_a.size + sig_b.size - 1)
         n_fft = self._next_pow2(n)
         sig_a_f = np.fft.rfft(sig_a, n=n_fft)
@@ -451,15 +548,33 @@ class FeatureProcessor:
         cross /= np.maximum(np.abs(cross), np.finfo(float).eps)
         corr = np.fft.irfft(cross, n=n_fft)
         corr = np.concatenate([corr[-(n_fft // 2) :], corr[: n_fft // 2]])
+
+        if bool(self.cfg.gcc_use_geometry_window) and max_delay_samples is not None:
+            half_span = int(max(0, int(max_delay_samples)) + int(self.cfg.gcc_delay_padding))
+            geom_len = int(2 * half_span + 1)
+            corr = self._central_crop(corr.astype(np.float64, copy=False), geom_len)
         return self._central_crop(corr.astype(np.float64, copy=False), self.cfg.gcc_truncated_len)
 
-    def compute_gcc_phat(self, x_ref: np.ndarray) -> np.ndarray:
+    def compute_gcc_phat(
+        self,
+        x_ref: np.ndarray,
+        ref_positions: np.ndarray | None = None,
+        sound_speed: float | None = None,
+    ) -> np.ndarray:
         arr = np.asarray(x_ref, dtype=float)
         if arr.shape[0] != 3:
             raise ValueError(f"x_ref first dimension must be 3, got {arr.shape[0]}.")
         out = np.zeros((3, self.cfg.gcc_truncated_len), dtype=np.float32)
         for k, (i, j) in enumerate(self.pairs):
-            out[k] = self.gcc_phat_pair(arr[i], arr[j]).astype(np.float32)
+            max_delay_samples = None
+            if ref_positions is not None and sound_speed is not None:
+                max_delay_samples = self._resolve_max_delay_samples(
+                    np.asarray(ref_positions, dtype=float)[i],
+                    np.asarray(ref_positions, dtype=float)[j],
+                    sound_speed=float(sound_speed),
+                    fs=int(self.cfg.fs),
+                )
+            out[k] = self.gcc_phat_pair(arr[i], arr[j], max_delay_samples=max_delay_samples).astype(np.float32)
         return out
 
     def compute_psd_features(self, sig: np.ndarray) -> np.ndarray:
@@ -473,6 +588,26 @@ class FeatureProcessor:
         psd = (np.abs(spec) ** 2) / max(n_fft, 1)
         psd = np.log10(psd + np.finfo(float).eps)
         return psd.astype(np.float32)
+
+    def lowband_complex_spectrum(self, sig: np.ndarray) -> np.ndarray:
+        arr = np.asarray(sig, dtype=float).reshape(-1)
+        n_fft = int(self.acoustic_nfft)
+        if arr.size < n_fft:
+            arr = np.pad(arr, (0, n_fft - arr.size), mode="constant")
+        else:
+            arr = arr[:n_fft]
+        spec = np.fft.rfft(arr, n=n_fft)
+        return np.asarray(spec[self.acoustic_mask], dtype=np.complex64)
+
+    def encode_complex_ri(self, spec: np.ndarray) -> np.ndarray:
+        c = np.asarray(spec, dtype=np.complex64)
+        return np.stack([c.real.astype(np.float32), c.imag.astype(np.float32)], axis=0)
+
+    def encode_complex_mp(self, spec: np.ndarray) -> np.ndarray:
+        c = np.asarray(spec, dtype=np.complex64)
+        mag = np.log1p(np.abs(c)).astype(np.float32)
+        phase = np.angle(c).astype(np.float32)
+        return np.stack([mag, phase], axis=0)
 
 
 class LayoutPreviewer:
@@ -561,6 +696,26 @@ class AcousticScenarioSampler:
             )
         return float(absorption), int(image_order)
 
+    def _sample_reference_center(self, room_size: np.ndarray) -> np.ndarray:
+        room_mid = 0.5 * np.asarray(room_size, dtype=float)
+        max_ref_radius = float(self.cfg.reference_radius_range[1]) + 0.08
+        x_span = min(float(self.cfg.ref_center_jitter_xy), float(room_mid[0] - self.cfg.wall_margin - max_ref_radius))
+        y_span = min(float(self.cfg.ref_center_jitter_xy), float(room_mid[1] - self.cfg.wall_margin - max_ref_radius))
+        if x_span <= 0.0 or y_span <= 0.0:
+            raise QCError("geometry:room_too_small_for_reference_center")
+        z_low = max(float(self.cfg.wall_margin + 0.10), float(self.cfg.ref_center_height_range[0]))
+        z_high = min(float(room_size[2] - self.cfg.wall_margin - 0.10), float(self.cfg.ref_center_height_range[1]))
+        if z_high <= z_low:
+            raise QCError("geometry:room_too_small_for_reference_center_height")
+        return np.array(
+            [
+                self.rng.uniform(room_mid[0] - x_span, room_mid[0] + x_span),
+                self.rng.uniform(room_mid[1] - y_span, room_mid[1] + y_span),
+                self.rng.uniform(z_low, z_high),
+            ],
+            dtype=float,
+        )
+
     def _sample_source_position(self, room_size: np.ndarray) -> np.ndarray:
         xy_margin = min(
             float(self.cfg.source_wall_margin),
@@ -616,8 +771,115 @@ class AcousticScenarioSampler:
                 continue
             if float(np.min(np.linalg.norm(refs - source_pos[None, :], axis=1))) < float(self.cfg.min_source_reference_distance):
                 continue
+            tri_angles = _triangle_angles_deg(refs)
+            if float(np.min(tri_angles)) < float(self.cfg.ref_triangle_min_angle_deg):
+                continue
+            if float(np.max(tri_angles)) > float(self.cfg.ref_triangle_max_angle_deg):
+                continue
             return refs
         raise QCError("geometry:failed_reference_layout")
+
+    def _is_outside_reference_triangle(self, point: np.ndarray, ref_positions: np.ndarray) -> bool:
+        p_xy = np.asarray(point, dtype=float)[:2]
+        tri_xy = np.asarray(ref_positions, dtype=float)[:, :2]
+        if _point_in_triangle_xy(p_xy, tri_xy):
+            return False
+        edge_dist = min(
+            _point_to_segment_distance_xy(p_xy, tri_xy[0], tri_xy[1]),
+            _point_to_segment_distance_xy(p_xy, tri_xy[1], tri_xy[2]),
+            _point_to_segment_distance_xy(p_xy, tri_xy[2], tri_xy[0]),
+        )
+        return bool(edge_dist >= float(self.cfg.triangle_outside_margin))
+
+    def _sample_aligned_secondary_and_error(
+        self,
+        ref_center: np.ndarray,
+        ref_positions: np.ndarray,
+        room_size: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        z_low = max(float(self.cfg.wall_margin + 0.05), float(self.cfg.secondary_height_range[0]))
+        z_high = min(float(room_size[2] - self.cfg.wall_margin - 0.05), float(self.cfg.secondary_height_range[1]))
+        if z_high <= z_low:
+            raise QCError("geometry:room_too_small_for_secondary")
+
+        for _ in range(220):
+            theta = float(self.rng.uniform(0.0, 2.0 * np.pi))
+            sec_radius = float(self.rng.uniform(*self.cfg.sec_center_distance_range))
+            err_low = max(float(self.cfg.err_center_distance_range[0]), sec_radius + float(self.cfg.min_err_sec_gap))
+            err_high = float(self.cfg.err_center_distance_range[1])
+            if err_high <= err_low:
+                continue
+            err_radius = float(self.rng.uniform(err_low, err_high))
+
+            z_base = float(np.clip(ref_center[2] + self.rng.uniform(-0.05, 0.05), z_low, z_high))
+            z_err = float(np.clip(z_base + self.rng.uniform(-0.02, 0.02), z_low, z_high))
+            sec = np.array(
+                [
+                    ref_center[0] + sec_radius * np.cos(theta),
+                    ref_center[1] + sec_radius * np.sin(theta),
+                    z_base,
+                ],
+                dtype=float,
+            )
+            err = np.array(
+                [
+                    ref_center[0] + err_radius * np.cos(theta),
+                    ref_center[1] + err_radius * np.sin(theta),
+                    z_err,
+                ],
+                dtype=float,
+            )
+            if not self._all_inside_room(np.vstack([sec, err]), room_size):
+                continue
+            if not self._is_outside_reference_triangle(sec, ref_positions):
+                continue
+            if not self._is_outside_reference_triangle(err, ref_positions):
+                continue
+            if float(np.min(np.linalg.norm(ref_positions - sec[None, :], axis=1))) < float(self.cfg.min_reference_device_distance):
+                continue
+            if float(np.min(np.linalg.norm(ref_positions - err[None, :], axis=1))) < float(self.cfg.min_reference_device_distance):
+                continue
+
+            line_clearance = min(_point_to_line_distance(ref_pos, sec, err) for ref_pos in np.asarray(ref_positions, dtype=float))
+            if line_clearance < float(self.cfg.line_to_ref_min_distance):
+                continue
+
+            v_center = np.asarray(ref_center, dtype=float) - sec
+            v_err = err - sec
+            if float(np.dot(v_center, v_err)) >= 0.0:
+                continue
+            denom = float(np.linalg.norm(v_center) * np.linalg.norm(v_err))
+            if denom <= np.finfo(float).eps:
+                continue
+            col_sine = float(np.linalg.norm(np.cross(v_center, v_err)) / denom)
+            if col_sine > float(self.cfg.collinearity_max_sine):
+                continue
+            return sec, err
+        raise QCError("geometry:failed_secondary_error_collinear_layout")
+
+    def _sample_source_position_farfield(
+        self,
+        room_size: np.ndarray,
+        ref_center: np.ndarray,
+        ref_positions: np.ndarray,
+        sec_pos: np.ndarray,
+        err_pos: np.ndarray,
+    ) -> tuple[np.ndarray, float, float]:
+        for _ in range(220):
+            source_pos = self._sample_source_position(room_size)
+            if float(np.linalg.norm(source_pos - ref_center)) < float(self.cfg.min_noise_source_ref_center_distance):
+                continue
+            if float(np.min(np.linalg.norm(ref_positions - source_pos[None, :], axis=1))) < float(self.cfg.min_source_reference_distance):
+                continue
+            if float(np.linalg.norm(source_pos - sec_pos)) < float(self.cfg.min_source_device_distance):
+                continue
+            if float(np.linalg.norm(source_pos - err_pos)) < float(self.cfg.min_source_device_distance):
+                continue
+            ok, primary_margin, secondary_margin = self._causality_status(source_pos, ref_positions, sec_pos, err_pos)
+            if not ok:
+                continue
+            return source_pos, primary_margin, secondary_margin
+        raise QCError("geometry:failed_farfield_source_layout")
 
     def _sample_secondary_height(self, room_size: np.ndarray) -> float:
         z_low = max(float(self.cfg.wall_margin + 0.05), float(self.cfg.secondary_height_range[0]))
@@ -747,12 +1009,18 @@ class AcousticScenarioSampler:
     def sample(self) -> dict[str, Any]:
         for _ in range(1500):
             room_size = self._sample_room_size()
-            source_pos = self._sample_source_position(room_size)
-            ref_positions = self._sample_reference_positions(source_pos, room_size)
+            ref_center = self._sample_reference_center(room_size)
+            ref_positions = self._sample_reference_positions(ref_center, room_size)
             layout_mode = self._sample_layout_mode()
             try:
-                sec_pos = self._sample_secondary_position(source_pos, ref_positions, room_size, layout_mode)
-                err_pos, primary_margin, secondary_margin = self._sample_error_position(source_pos, ref_positions, sec_pos, room_size)
+                sec_pos, err_pos = self._sample_aligned_secondary_and_error(ref_center, ref_positions, room_size)
+                source_pos, primary_margin, secondary_margin = self._sample_source_position_farfield(
+                    room_size,
+                    ref_center,
+                    ref_positions,
+                    sec_pos,
+                    err_pos,
+                )
             except QCError:
                 continue
 
@@ -763,6 +1031,7 @@ class AcousticScenarioSampler:
                 "room_size": room_size,
                 "source_pos": source_pos,
                 "ref_positions": ref_positions,
+                "ref_center": np.asarray(ref_center, dtype=float),
                 "sec_positions": np.asarray(sec_pos[None, :], dtype=float),
                 "err_positions": np.asarray(err_pos[None, :], dtype=float),
                 **layout_meta,
@@ -782,6 +1051,7 @@ class AcousticScenarioSampler:
         mgr.sound_speed = float(sampled["sound_speed"])
         mgr.image_source_order = int(sampled["image_order"])
         mgr.material_absorption = float(sampled["absorption"])
+        mgr.air_absorption = bool(self.cfg.enable_air_absorption)
         mgr.compensate_fractional_delay = True
         mgr.fractional_delay_shift = None
         mgr.add_primary_speaker(int(self.source_id), sampled["source_pos"])
@@ -1572,7 +1842,7 @@ def _calibrate_canonical_regularization(
     return best
 
 
-def compute_processed_features(h5_path: str | Path) -> dict[str, int]:
+def compute_processed_features(h5_path: str | Path) -> dict[str, Any]:
     h5_path = Path(h5_path)
     with h5py.File(str(h5_path), "a") as h5:
         cfg = DatasetBuildConfig(**json.loads(h5.attrs["config_json"]))
@@ -1587,6 +1857,9 @@ def compute_processed_features(h5_path: str | Path) -> dict[str, int]:
         e2r = np.asarray(raw["E2R_paths"], dtype=np.float32)
         s2r = np.asarray(raw["S2R_paths"], dtype=np.float32)
         r2r = np.asarray(raw["R2R_paths"], dtype=np.float32)
+        room = raw["room_params"]
+        room_ref_positions = np.asarray(room["ref_positions"], dtype=np.float32)
+        room_sound_speed = np.asarray(room["sound_speed"], dtype=np.float32)
         w_opt = np.asarray(raw["W_opt"], dtype=np.float32)
         n_rooms = int(x_ref.shape[0])
         q_full_len = int(cfg.filter_len + cfg.rir_store_len - 1)
@@ -1652,8 +1925,53 @@ def compute_processed_features(h5_path: str | Path) -> dict[str, int]:
         gcc = np.zeros((n_rooms, 3, cfg.gcc_truncated_len), dtype=np.float32)
         psd = np.zeros((n_rooms, cfg.psd_nfft // 2 + 1), dtype=np.float32)
         for i in range(n_rooms):
-            gcc[i] = feature_proc.compute_gcc_phat(x_ref[i])
+            gcc[i] = feature_proc.compute_gcc_phat(
+                x_ref[i],
+                ref_positions=room_ref_positions[i],
+                sound_speed=float(room_sound_speed[i]),
+            )
             psd[i] = feature_proc.compute_psd_features(x_ref[i, 0])
+
+        acoustic_channel_names = [
+            "S_err",
+            "D_err",
+            "P_ref_0",
+            "P_ref_1",
+            "P_ref_2",
+            "E2R_0",
+            "E2R_1",
+            "E2R_2",
+            "S2R_0",
+            "S2R_1",
+            "S2R_2",
+            "R2R_01",
+            "R2R_02",
+            "R2R_12",
+        ]
+        lowband_bins = int(np.sum(feature_proc.acoustic_mask))
+        acoustic_ri = np.zeros((n_rooms, 2 * len(acoustic_channel_names), lowband_bins), dtype=np.float32)
+        acoustic_mp = np.zeros((n_rooms, 2 * len(acoustic_channel_names), lowband_bins), dtype=np.float32)
+        for i in range(n_rooms):
+            traces = [
+                np.asarray(s_paths[i], dtype=np.float32),
+                np.asarray(d_paths[i], dtype=np.float32),
+                np.asarray(p_ref_paths[i, 0], dtype=np.float32),
+                np.asarray(p_ref_paths[i, 1], dtype=np.float32),
+                np.asarray(p_ref_paths[i, 2], dtype=np.float32),
+                np.asarray(e2r[i, 0], dtype=np.float32),
+                np.asarray(e2r[i, 1], dtype=np.float32),
+                np.asarray(e2r[i, 2], dtype=np.float32),
+                np.asarray(s2r[i, 0], dtype=np.float32),
+                np.asarray(s2r[i, 1], dtype=np.float32),
+                np.asarray(s2r[i, 2], dtype=np.float32),
+                np.asarray(r2r[i, 0], dtype=np.float32),
+                np.asarray(r2r[i, 1], dtype=np.float32),
+                np.asarray(r2r[i, 2], dtype=np.float32),
+            ]
+            for ch_idx, trace in enumerate(traces):
+                spec = feature_proc.lowband_complex_spectrum(trace)
+                acoustic_ri[i, 2 * ch_idx : 2 * ch_idx + 2] = feature_proc.encode_complex_ri(spec)
+                acoustic_mp[i, 2 * ch_idx : 2 * ch_idx + 2] = feature_proc.encode_complex_mp(spec)
 
         path_features = np.concatenate(
             [
@@ -1671,6 +1989,8 @@ def compute_processed_features(h5_path: str | Path) -> dict[str, int]:
         processed = h5.create_group("processed")
         processed.create_dataset("gcc_phat", data=gcc, dtype="f4")
         processed.create_dataset("psd_features", data=psd, dtype="f4")
+        processed.create_dataset("acoustic_feature_ri", data=acoustic_ri, dtype="f4")
+        processed.create_dataset("acoustic_feature_mp", data=acoustic_mp, dtype="f4")
         processed.create_dataset("path_features", data=path_features, dtype="f4")
         processed.create_dataset("w_targets", data=w_targets, dtype="f4")
         processed.create_dataset("q_target", data=q_target, dtype="f4")
@@ -1706,6 +2026,13 @@ def compute_processed_features(h5_path: str | Path) -> dict[str, int]:
         processed.attrs["q_tail_basis_dim"] = int(cfg.canonical_q_tail_basis_dim)
         processed.attrs["r2r_pair_order_json"] = json.dumps(list(cfg.canonical_r2r_pair_order), ensure_ascii=False)
         processed.attrs["canonical_calibration_json"] = json.dumps(calibration, ensure_ascii=False)
+        processed.attrs["acoustic_feature_nfft"] = int(cfg.acoustic_feature_nfft)
+        processed.attrs["acoustic_feature_low_hz"] = float(cfg.acoustic_feature_low_hz)
+        processed.attrs["acoustic_feature_high_hz"] = float(cfg.acoustic_feature_high_hz)
+        processed.attrs["acoustic_feature_bins"] = int(lowband_bins)
+        processed.attrs["acoustic_feature_channel_names_json"] = json.dumps(acoustic_channel_names, ensure_ascii=False)
+        processed.attrs["acoustic_feature_ri_channels"] = int(acoustic_ri.shape[1])
+        processed.attrs["acoustic_feature_mp_channels"] = int(acoustic_mp.shape[1])
 
     keep_summary = {
         "s_keep_len": int(s_keep),
@@ -1720,6 +2047,9 @@ def compute_processed_features(h5_path: str | Path) -> dict[str, int]:
         "lambda_q_scale": float(best_lambda_q_scale),
         "lambda_w": float(best_lambda_w),
         "q_target_source": str(calibration.get("q_target_source", "h5_equivalent")),
+        "acoustic_feature_bins": int(lowband_bins),
+        "acoustic_feature_ri_channels": int(acoustic_ri.shape[1]),
+        "acoustic_feature_mp_channels": int(acoustic_mp.shape[1]),
     }
     print("Processed features updated:", keep_summary)
     return keep_summary

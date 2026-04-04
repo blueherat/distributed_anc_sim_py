@@ -18,6 +18,7 @@ class RIRManager:
     sound_speed: float = 343.0
     image_source_order: int = 3
     material_absorption: float = 0.5
+    air_absorption: bool = False
     compensate_fractional_delay: bool = True
     fractional_delay_shift: int | None = None
 
@@ -53,6 +54,7 @@ class RIRManager:
             fs=int(self.fs),
             max_order=int(self.image_source_order),
             absorption=float(self.material_absorption),
+            air_absorption=bool(self.air_absorption),
         )
 
     def _compute_rir(self, tx_pos: np.ndarray, rx_positions: np.ndarray) -> np.ndarray:

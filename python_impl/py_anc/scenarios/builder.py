@@ -57,6 +57,7 @@ def build_manager_from_config(
     mgr.sound_speed = float(config.room.sound_speed)
     mgr.image_source_order = int(config.room.image_source_order)
     mgr.material_absorption = float(config.room.material_absorption)
+    mgr.air_absorption = bool(config.room.air_absorption)
     mgr.compensate_fractional_delay = bool(config.room.compensate_fractional_delay)
     mgr.fractional_delay_shift = (
         None if config.room.fractional_delay_shift is None else int(config.room.fractional_delay_shift)

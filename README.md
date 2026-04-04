@@ -101,6 +101,103 @@ python python_impl/test_environment_builder.py
 python python_impl/python_scripts/run_experiment.py --algorithms "CFxLMS,ADFxLMS,ADFxLMS-BC,Diff-FxLMS,DCFxLMS,CDFxLMS,MGDFxLMS" --duration 2 --output-json "python_impl/python_scripts/equivalence_py_summary.json"
 ```
 
+### 4) Hybrid Deep-FxLMS（单控制）训练与验收
+
+先确保数据集包含更新后的 `processed/acoustic_feature_ri` 与 `processed/acoustic_feature_mp` 特征（若需要可重新运行数据脚本的 `--process-only`）。
+
+训练（课程级别、Cross-Attention、DCT 生成头、物理损失）：
+
+```bash
+python python_impl/python_scripts/train_hybrid_deep_fxlms_single_control.py --output-dir python_impl/experiments/anc_single_control/hybrid_deep_fxlms_formal --curriculum-levels 1,2,3 --epochs-per-level 20,20,30 --fusion-mode cross --feature-encoding ri --basis-dim 32 --lambda-reg 1e-3 --loss-domain freq --min-level1-samples 128 --min-level23-samples 512 --min-qc-nr-last-p10-db 12 --min-qc-nr-gain-p10-db 12
+```
+
+对照实验（将卷积域切换为时域）：
+
+```bash
+python python_impl/python_scripts/train_hybrid_deep_fxlms_single_control.py --output-dir python_impl/experiments/anc_single_control/hybrid_deep_fxlms_formal_time --curriculum-levels 1,2,3 --epochs-per-level 20,20,30 --fusion-mode cross --feature-encoding ri --basis-dim 32 --lambda-reg 1e-3 --loss-domain time --min-level1-samples 128 --min-level23-samples 512 --min-qc-nr-last-p10-db 12 --min-qc-nr-gain-p10-db 12
+```
+
+评估（含门禁判定与 warm-start 指标）：
+
+```bash
+python python_impl/python_scripts/evaluate_hybrid_deep_fxlms_single_control.py --checkpoint-path python_impl/experiments/anc_single_control/hybrid_deep_fxlms_smoke/final_hybrid_deep_fxlms.pt --target-metric nr_last_db --half-target-ratio 0.5
+```
+
+说明：评估新增“半目标门禁”，默认检查验证集均值是否满足 `init_nr_db_mean >= 0.5 * target_nr_db_mean`（目标来自 `raw/qc_metrics/nr_last_db`）。
+
+### 5) Hybrid 消融批跑与自动汇总（标准集）
+
+一键批跑（标准 12 组消融 * 5 种子，默认 CPU，自动跳过已完成组）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/run_hybrid_ablation_standard_multiseed.ps1
+```
+
+直接用 Python 调度器（可自定义输出目录、设备、种子）：
+
+```bash
+python python_impl/python_scripts/run_hybrid_ablation_suite.py --results-root python_impl/experiments/anc_single_control/hybrid_ablation_standard_20260403 --seeds 7,42,123,999,20260403 --device cpu --skip-existing
+```
+
+启用 half-target 目标导向损失（稳健默认：`--nr-margin-weight 0.1 --nr-target-ratio 0.5 --nr-margin-warmup-epochs 8`）：
+
+```bash
+python python_impl/python_scripts/run_hybrid_ablation_suite.py --results-root python_impl/experiments/anc_single_control/hybrid_ablation_standard_20260403 --seeds 7,42 --device cpu --nr-margin-weight 0.1 --nr-target-ratio 0.5 --nr-margin-warmup-epochs 8
+```
+
+若需要更强的目标拉动（直接优化 dB 缺口，并聚焦信号前段），可启用：
+
+```bash
+python python_impl/python_scripts/run_hybrid_ablation_suite.py --results-root python_impl/experiments/anc_single_control/hybrid_ablation_standard_20260403 --seeds 7,42 --device cpu --nr-margin-mode db --nr-margin-focus-ratio 0.25 --nr-margin-weight 1e-4 --nr-target-ratio 0.5 --nr-margin-warmup-epochs 8
+```
+
+若目标是提升 warm-start 初始化性能，可叠加 `W_opt` 监督（需数据集中存在 `raw/W_opt`）：
+
+```bash
+python python_impl/python_scripts/run_hybrid_ablation_suite.py --results-root python_impl/experiments/anc_single_control/hybrid_ablation_standard_20260403 --seeds 7,42 --device cpu --nr-margin-mode db --nr-margin-focus-ratio 0.25 --nr-margin-weight 1e-4 --wopt-supervision-weight 1.0 --nr-target-ratio 0.5 --nr-margin-warmup-epochs 8
+```
+
+仅重评估已有 checkpoint（不重训，常用于刷新半目标门禁字段）：
+
+```bash
+python python_impl/python_scripts/run_hybrid_ablation_suite.py --results-root python_impl/experiments/anc_single_control/hybrid_ablation_standard_20260403 --h5-path python_impl/python_scripts/cfxlms_qc_dataset_single_control.h5 --eval-only-existing --force-rerun-eval
+```
+
+小规模烟测（仅前 1 组、1 种子）：
+
+```bash
+python python_impl/python_scripts/run_hybrid_ablation_suite.py --results-root python_impl/experiments/anc_single_control/hybrid_ablation_smoke --seeds 7 --max-configs 1 --epochs-per-level 1,1,1 --max-train-samples 64 --device cpu
+```
+
+汇总与排名（输出组间均值/方差/CI 与门禁通过率）：
+
+```bash
+python python_impl/python_scripts/aggregate_hybrid_ablation_results.py --results-root python_impl/experiments/anc_single_control/hybrid_ablation_standard_20260403
+```
+
+2+1 轮迭代优化（2 轮粗筛 + 1 轮全量复验，自动传递 Top-K）：
+
+```bash
+python python_impl/python_scripts/run_hybrid_ablation_iterative.py --results-root python_impl/experiments/anc_single_control/hybrid_ablation_iterative_20260404 --h5-path python_impl/python_scripts/cfxlms_qc_dataset_single_control.h5 --device cpu --half-target-ratio 0.5 --top-k 3 --skip-existing
+```
+
+2+1 迭代中同步启用目标导向损失：
+
+```bash
+python python_impl/python_scripts/run_hybrid_ablation_iterative.py --results-root python_impl/experiments/anc_single_control/hybrid_ablation_iterative_20260404 --h5-path python_impl/python_scripts/cfxlms_qc_dataset_single_control.h5 --device cpu --half-target-ratio 0.5 --nr-margin-weight 0.1 --nr-target-ratio 0.5 --nr-margin-warmup-epochs 8 --top-k 3 --skip-existing
+```
+
+2+1 迭代中使用 dB 缺口型目标损失：
+
+```bash
+python python_impl/python_scripts/run_hybrid_ablation_iterative.py --results-root python_impl/experiments/anc_single_control/hybrid_ablation_iterative_20260404 --h5-path python_impl/python_scripts/cfxlms_qc_dataset_single_control.h5 --device cpu --half-target-ratio 0.5 --nr-margin-mode db --nr-margin-focus-ratio 0.25 --nr-margin-weight 1e-4 --nr-target-ratio 0.5 --nr-margin-warmup-epochs 8 --top-k 3 --skip-existing
+```
+
+聚合输出目录：
+- `python_impl/experiments/anc_single_control/.../_aggregate/seed_level_metrics.csv`
+- `python_impl/experiments/anc_single_control/.../_aggregate/group_summary_ranked.csv`
+- `python_impl/experiments/anc_single_control/.../_aggregate/summary.json`
+
 ## Python 场景参数接口（用于训练数据构造）
 
 位于 `python_impl/py_anc/scenarios/`：

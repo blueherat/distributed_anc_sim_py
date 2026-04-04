@@ -5,6 +5,7 @@ from .diff_fxlms import diff_fxlms
 from .dcfxlms import dcfxlms
 from .cdfxlms import cdfxlms
 from .mgdfxlms import mgdfxlms
+from .hybrid_loss import HybridAcousticLoss
 
 __all__ = [
     "cfxlms",
@@ -14,4 +15,5 @@ __all__ = [
     "dcfxlms",
     "cdfxlms",
     "mgdfxlms",
+    "HybridAcousticLoss",
 ]

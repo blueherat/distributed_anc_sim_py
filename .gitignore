@@ -10,3 +10,9 @@ python_impl/experiments/hypothesis_validation/02_source_localization_reflections
 python_impl/python_scripts/*.h5
 python_impl/experiments/hypothesis_validation/**/data/*.h5
 related_papers/
+*.json
+*.log
+*.csv
+*.txt
+*.pt
+*.pyc

@@ -13,6 +13,7 @@ class RoomConfig:
     sound_speed: float = 343.0
     image_source_order: int = 2
     material_absorption: float = 0.5
+    air_absorption: bool = False
     compensate_fractional_delay: bool = True
     fractional_delay_shift: int | None = None
 
