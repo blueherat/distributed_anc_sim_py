@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -56,6 +57,39 @@ def level_mask(image_order: np.ndarray, level: int) -> np.ndarray:
     if int(level) in (2, 3):
         return np.isin(arr, np.asarray([1, 2], dtype=np.int64))
     raise ValueError(f"Unsupported level: {level}")
+
+
+def _parse_acoustic_channel_names(processed_group: h5py.Group) -> list[str]:
+    raw = processed_group.attrs.get("acoustic_feature_channel_names_json", "")
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="ignore")
+    text = str(raw).strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(v) for v in parsed]
+
+
+def _resolve_acoustic_zero_indices(channel_names: list[str], regex_text: str, total_channels: int) -> tuple[list[int], list[str]]:
+    pattern_text = str(regex_text).strip()
+    if not pattern_text or not channel_names:
+        return [], []
+    pattern = re.compile(pattern_text)
+    pair_count = int(total_channels) // 2
+    logical_indices = [
+        i for i, name in enumerate(channel_names) if (i < pair_count and pattern.search(str(name)) is not None)
+    ]
+    out_idx: list[int] = []
+    matched_names: list[str] = []
+    for i in logical_indices:
+        out_idx.extend([2 * i, 2 * i + 1])
+        matched_names.append(str(channel_names[i]))
+    return out_idx, matched_names
 
 
 def build_dct_basis(filter_len: int, basis_dim: int) -> torch.Tensor:
@@ -381,7 +415,12 @@ def split_indices_train_val_test(
     return train_idx, val_idx, test_idx
 
 
-def load_bundle(h5_path: Path, encoding: str, disable_feature_b: bool) -> HybridBundle:
+def load_bundle(
+    h5_path: Path,
+    encoding: str,
+    disable_feature_b: bool,
+    acoustic_zero_channel_regex: str = "",
+) -> HybridBundle:
     with h5py.File(str(h5_path), "r") as h5:
         raw = h5["raw"]
         processed = h5["processed"]
@@ -398,6 +437,28 @@ def load_bundle(h5_path: Path, encoding: str, disable_feature_b: bool) -> Hybrid
                     f"Missing {key} in processed group. Run dataset processing with updated feature pipeline first."
                 )
             acoustic = np.asarray(processed[key], dtype=np.float32)
+            zero_regex = str(acoustic_zero_channel_regex).strip()
+            if zero_regex:
+                logical_names = _parse_acoustic_channel_names(processed)
+                zero_idx, matched_names = _resolve_acoustic_zero_indices(
+                    logical_names,
+                    zero_regex,
+                    int(acoustic.shape[1]),
+                )
+                if zero_idx:
+                    acoustic[:, np.asarray(zero_idx, dtype=np.int64), :] = 0.0
+                    print(
+                        "[acoustic-mask] "
+                        f"regex='{zero_regex}' "
+                        f"matched_logical={len(matched_names)} "
+                        f"masked_channels={len(zero_idx)} "
+                        f"names={matched_names}"
+                    )
+                else:
+                    print(
+                        "[acoustic-mask] "
+                        f"regex='{zero_regex}' matched no channel names; no masking applied."
+                    )
 
         target_nr_db: np.ndarray | None = None
         if "qc_metrics" in raw and "nr_last_db" in raw["qc_metrics"]:
@@ -676,6 +737,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fusion-mode", choices=("cat", "cross"), default="cross")
     parser.add_argument("--feature-encoding", choices=("ri", "mp"), default="ri")
     parser.add_argument("--disable-feature-b", action="store_true")
+    parser.add_argument(
+        "--acoustic-zero-channel-regex",
+        type=str,
+        default="",
+        help="Regex over logical acoustic channel names (e.g., ^E2R_|^R2R_) to zero matched channel pairs at load time.",
+    )
     parser.add_argument("--use-path-features", action="store_true")
     parser.add_argument("--use-index-embedding", action="store_true")
     parser.add_argument("--index-direct-lookup", action="store_true")
@@ -711,7 +778,12 @@ def main() -> int:
         raise ValueError("epochs-per-level must provide one value or match curriculum-levels length.")
 
     h5_path = resolve_h5_path(args.h5_path)
-    bundle = load_bundle(h5_path=h5_path, encoding=str(args.feature_encoding), disable_feature_b=bool(args.disable_feature_b))
+    bundle = load_bundle(
+        h5_path=h5_path,
+        encoding=str(args.feature_encoding),
+        disable_feature_b=bool(args.disable_feature_b),
+        acoustic_zero_channel_regex=str(args.acoustic_zero_channel_regex),
+    )
 
     if bool(args.use_canonical_prior) and bundle.w_canon is None:
         raise RuntimeError(
@@ -931,6 +1003,7 @@ def main() -> int:
                 "fusion_mode": str(args.fusion_mode),
                 "feature_encoding": str(args.feature_encoding),
                 "disable_feature_b": bool(args.disable_feature_b),
+                "acoustic_zero_channel_regex": str(args.acoustic_zero_channel_regex),
                 "use_path_features": bool(args.use_path_features),
                 "use_index_embedding": bool(args.use_index_embedding),
                 "index_direct_lookup": bool(args.index_direct_lookup),
@@ -990,6 +1063,7 @@ def main() -> int:
         "fusion_mode": str(args.fusion_mode),
         "feature_encoding": str(args.feature_encoding),
         "disable_feature_b": bool(args.disable_feature_b),
+        "acoustic_zero_channel_regex": str(args.acoustic_zero_channel_regex),
         "use_path_features": bool(args.use_path_features),
         "use_index_embedding": bool(args.use_index_embedding),
         "index_direct_lookup": bool(args.index_direct_lookup),

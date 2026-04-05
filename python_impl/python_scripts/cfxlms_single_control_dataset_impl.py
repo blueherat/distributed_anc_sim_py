@@ -1573,10 +1573,13 @@ class ANCDatasetBuilder:
             )
 
         compute_processed_features(output_path)
+        summary_path, summary_obj = _write_dataset_stability_summary(output_path, self.cfg)
 
         print("Common failure reasons (Top8):")
         for reason, count in sorted(self.failure_stats.items(), key=lambda kv: kv[1], reverse=True)[:8]:
             print(f"  - {reason}: {count}")
+        print(f"Dataset stability summary saved: {summary_path}")
+        print(json.dumps(summary_obj, ensure_ascii=False, indent=2))
         print(f"All done.\nOutput file: {output_path}")
         return output_path
 
@@ -2055,6 +2058,158 @@ def compute_processed_features(h5_path: str | Path) -> dict[str, Any]:
     return keep_summary
 
 
+def _parse_float_range_arg(text: str, arg_name: str) -> tuple[float, float]:
+    parts = [p.strip() for p in str(text).split(",") if p.strip()]
+    if len(parts) != 2:
+        raise ValueError(f"{arg_name} expects exactly two comma-separated values, got: {text}")
+    lo = float(parts[0])
+    hi = float(parts[1])
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        raise ValueError(f"{arg_name} must satisfy finite low < high, got: {text}")
+    return float(lo), float(hi)
+
+
+def _parse_int_tuple_arg(text: str, arg_name: str) -> tuple[int, ...]:
+    parts = [p.strip() for p in str(text).split(",") if p.strip()]
+    if not parts:
+        raise ValueError(f"{arg_name} expects at least one comma-separated integer, got: {text}")
+    values = tuple(int(v) for v in parts)
+    return values
+
+
+def _parse_prob_tuple_arg(text: str, expected_len: int, arg_name: str) -> tuple[float, ...]:
+    parts = [p.strip() for p in str(text).split(",") if p.strip()]
+    if len(parts) != int(expected_len):
+        raise ValueError(
+            f"{arg_name} expects {expected_len} comma-separated values, got {len(parts)}: {text}"
+        )
+    vals = np.asarray([float(v) for v in parts], dtype=np.float64)
+    if np.any(~np.isfinite(vals)) or np.any(vals < 0.0):
+        raise ValueError(f"{arg_name} contains non-finite or negative values: {text}")
+    s = float(np.sum(vals))
+    if s <= 0.0:
+        raise ValueError(f"{arg_name} sum must be positive, got: {text}")
+    vals = vals / s
+    return tuple(float(v) for v in vals.tolist())
+
+
+def _parse_layout_modes_arg(text: str, arg_name: str) -> tuple[str, ...]:
+    parts = tuple(p.strip() for p in str(text).split(",") if p.strip())
+    if not parts:
+        raise ValueError(f"{arg_name} expects at least one layout mode, got: {text}")
+    allowed = {"free_far", "wall_side", "corner_far"}
+    unknown = [v for v in parts if v not in allowed]
+    if unknown:
+        raise ValueError(f"{arg_name} has unsupported layout modes: {unknown}; allowed={sorted(allowed)}")
+    return parts
+
+
+def _apply_domain_profile(cfg: DatasetBuildConfig, profile: str) -> None:
+    p = str(profile).strip().lower()
+    if p == "in_domain":
+        return
+    if p == "ood_mild":
+        cfg.room_size_min = 4.0
+        cfg.room_size_max = 6.5
+        cfg.sound_speed_min = 336.0
+        cfg.sound_speed_max = 348.0
+        cfg.reflection_room_probability = 0.70
+        cfg.direct_room_absorption_range = (0.18, 0.28)
+        cfg.reflection_room_absorption_range = (0.10, 0.22)
+        cfg.direct_room_image_order_choices = (0, 1, 2)
+        cfg.direct_room_image_order_probs = (0.15, 0.65, 0.20)
+        cfg.reflection_room_image_order_choices = (1, 2, 3)
+        cfg.reflection_room_image_order_probs = (0.55, 0.35, 0.10)
+        cfg.layout_mode_probs = (0.30, 0.35, 0.35)
+        cfg.min_source_device_distance = max(float(cfg.min_source_device_distance), 0.60)
+        return
+    if p == "ood_hard":
+        cfg.room_size_min = 5.0
+        cfg.room_size_max = 8.5
+        cfg.sound_speed_min = 334.0
+        cfg.sound_speed_max = 350.0
+        cfg.reflection_room_probability = 0.85
+        cfg.direct_room_absorption_range = (0.12, 0.22)
+        cfg.reflection_room_absorption_range = (0.05, 0.16)
+        cfg.direct_room_image_order_choices = (1, 2, 3)
+        cfg.direct_room_image_order_probs = (0.35, 0.45, 0.20)
+        cfg.reflection_room_image_order_choices = (2, 3, 4)
+        cfg.reflection_room_image_order_probs = (0.55, 0.30, 0.15)
+        cfg.layout_mode_probs = (0.20, 0.35, 0.45)
+        cfg.min_source_device_distance = max(float(cfg.min_source_device_distance), 0.65)
+        return
+    raise ValueError(f"Unsupported domain profile: {profile}")
+
+
+def _safe_array_stats(values: np.ndarray) -> dict[str, float]:
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        nan = float("nan")
+        return {
+            "mean": nan,
+            "std": nan,
+            "p10": nan,
+            "p50": nan,
+            "p90": nan,
+            "min": nan,
+            "max": nan,
+        }
+    return {
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr)),
+        "p10": float(np.quantile(arr, 0.10)),
+        "p50": float(np.quantile(arr, 0.50)),
+        "p90": float(np.quantile(arr, 0.90)),
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+    }
+
+
+def _write_dataset_stability_summary(h5_path: Path, cfg: DatasetBuildConfig) -> tuple[Path, dict[str, Any]]:
+    h5_path = Path(h5_path)
+    with h5py.File(str(h5_path), "a") as h5:
+        qc = h5["raw/qc_metrics"]
+        room = h5["raw/room_params"]
+
+        nr_last = np.asarray(qc["nr_last_db"], dtype=np.float64).reshape(-1)
+        nr_gain = np.asarray(qc["nr_gain_db"], dtype=np.float64).reshape(-1)
+        p_margin = np.asarray(room["primary_advance_margin_min"], dtype=np.float64).reshape(-1)
+        s_margin = np.asarray(room["secondary_feedback_margin_min"], dtype=np.float64).reshape(-1)
+
+        finite = np.isfinite(nr_last) & np.isfinite(nr_gain)
+        nr_last_pass = np.asarray(nr_last >= float(cfg.min_nr_last_db), dtype=np.float64)
+        nr_gain_pass = np.asarray(nr_gain >= float(cfg.min_nr_gain_db), dtype=np.float64)
+        both_pass = np.asarray((nr_last_pass > 0.5) & (nr_gain_pass > 0.5), dtype=np.float64)
+
+        pass_rates = {
+            "nr_last_pass_rate": float(np.mean(nr_last_pass[finite])) if np.any(finite) else float("nan"),
+            "nr_gain_pass_rate": float(np.mean(nr_gain_pass[finite])) if np.any(finite) else float("nan"),
+            "both_pass_rate": float(np.mean(both_pass[finite])) if np.any(finite) else float("nan"),
+        }
+
+        summary = {
+            "h5_path": str(h5_path),
+            "num_samples": int(nr_last.shape[0]),
+            "thresholds": {
+                "min_nr_last_db": float(cfg.min_nr_last_db),
+                "min_nr_gain_db": float(cfg.min_nr_gain_db),
+            },
+            "nr_last_db": _safe_array_stats(nr_last),
+            "nr_gain_db": _safe_array_stats(nr_gain),
+            "causality_margins_m": {
+                "primary_advance_min": _safe_array_stats(p_margin),
+                "secondary_feedback_min": _safe_array_stats(s_margin),
+            },
+            "pass_rates": pass_rates,
+        }
+        h5.attrs["dataset_qc_summary_json"] = json.dumps(summary, ensure_ascii=False)
+
+    summary_path = h5_path.with_suffix(".qc_summary.json")
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    return summary_path, summary
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build simplified CFxLMS ANC dataset (3 refs, 1 speaker, 1 error mic).")
     parser.add_argument("--num-rooms", type=int, default=1000, help="Number of accepted rooms to generate.")
@@ -2072,12 +2227,89 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-preview-layouts", action="store_true", help="Disable dynamic layout preview.")
     parser.add_argument("--min-nr-last-db", type=float, default=15.0, help="ANC QC threshold for final NR dB.")
     parser.add_argument("--min-nr-gain-db", type=float, default=15.0, help="ANC QC threshold for NR gain dB.")
+    parser.add_argument(
+        "--domain-profile",
+        choices=("in_domain", "ood_mild", "ood_hard"),
+        default="in_domain",
+        help="Preset geometry/acoustics coverage profile. in_domain keeps current defaults.",
+    )
+    parser.add_argument("--room-size-range", type=str, default=None, help="Override room size range as 'min,max' in meters.")
+    parser.add_argument("--sound-speed-range", type=str, default=None, help="Override sound speed range as 'min,max' (m/s).")
+    parser.add_argument(
+        "--direct-room-absorption-range",
+        type=str,
+        default=None,
+        help="Override direct-room absorption range as 'min,max'.",
+    )
+    parser.add_argument(
+        "--reflection-room-absorption-range",
+        type=str,
+        default=None,
+        help="Override reflection-room absorption range as 'min,max'.",
+    )
+    parser.add_argument(
+        "--reflection-room-probability",
+        type=float,
+        default=None,
+        help="Override probability of sampling reflection-heavy rooms in [0,1].",
+    )
+    parser.add_argument(
+        "--direct-room-image-orders",
+        type=str,
+        default=None,
+        help="Override direct-room image orders, e.g. '0,1,2'.",
+    )
+    parser.add_argument(
+        "--direct-room-image-order-probs",
+        type=str,
+        default=None,
+        help="Override direct-room image-order probabilities, e.g. '0.2,0.6,0.2'.",
+    )
+    parser.add_argument(
+        "--reflection-room-image-orders",
+        type=str,
+        default=None,
+        help="Override reflection-room image orders, e.g. '1,2,3'.",
+    )
+    parser.add_argument(
+        "--reflection-room-image-order-probs",
+        type=str,
+        default=None,
+        help="Override reflection-room image-order probabilities, e.g. '0.5,0.3,0.2'.",
+    )
+    parser.add_argument(
+        "--layout-modes",
+        type=str,
+        default=None,
+        help="Override layout modes from {free_far,wall_side,corner_far}, e.g. 'free_far,corner_far'.",
+    )
+    parser.add_argument(
+        "--layout-mode-probs",
+        type=str,
+        default=None,
+        help="Override layout mode probabilities matching --layout-modes.",
+    )
+    parser.add_argument("--wall-margin", type=float, default=None, help="Override wall margin (m).")
+    parser.add_argument("--source-wall-margin", type=float, default=None, help="Override source wall margin (m).")
+    parser.add_argument("--min-source-device-distance", type=float, default=None, help="Override min source-device distance (m).")
+    parser.add_argument(
+        "--min-primary-advance-margin-m",
+        type=float,
+        default=None,
+        help="Override min primary advance margin (m).",
+    )
+    parser.add_argument(
+        "--min-secondary-feedback-margin-m",
+        type=float,
+        default=None,
+        help="Override min secondary feedback margin (m).",
+    )
     parser.add_argument("--process-only", action="store_true", help="Only rebuild processed features for an existing HDF5 file.")
     return parser
 
 
 def config_from_args(args: argparse.Namespace) -> DatasetBuildConfig:
-    return DatasetBuildConfig(
+    cfg = DatasetBuildConfig(
         target_rooms=int(args.num_rooms),
         max_total_attempts=int(args.max_attempts),
         random_seed=int(args.seed),
@@ -2089,6 +2321,104 @@ def config_from_args(args: argparse.Namespace) -> DatasetBuildConfig:
         min_nr_last_db=float(args.min_nr_last_db),
         min_nr_gain_db=float(args.min_nr_gain_db),
     )
+    _apply_domain_profile(cfg, str(args.domain_profile))
+
+    if args.room_size_range is not None:
+        cfg.room_size_min, cfg.room_size_max = _parse_float_range_arg(args.room_size_range, "--room-size-range")
+    if args.sound_speed_range is not None:
+        cfg.sound_speed_min, cfg.sound_speed_max = _parse_float_range_arg(args.sound_speed_range, "--sound-speed-range")
+    if args.direct_room_absorption_range is not None:
+        cfg.direct_room_absorption_range = _parse_float_range_arg(
+            args.direct_room_absorption_range,
+            "--direct-room-absorption-range",
+        )
+    if args.reflection_room_absorption_range is not None:
+        cfg.reflection_room_absorption_range = _parse_float_range_arg(
+            args.reflection_room_absorption_range,
+            "--reflection-room-absorption-range",
+        )
+    if args.reflection_room_probability is not None:
+        rp = float(args.reflection_room_probability)
+        if rp < 0.0 or rp > 1.0:
+            raise ValueError(f"--reflection-room-probability must be in [0,1], got {rp}")
+        cfg.reflection_room_probability = rp
+
+    if args.direct_room_image_orders is not None:
+        direct_orders = _parse_int_tuple_arg(args.direct_room_image_orders, "--direct-room-image-orders")
+        if args.direct_room_image_order_probs is None:
+            direct_probs = tuple([1.0 / len(direct_orders)] * len(direct_orders))
+        else:
+            direct_probs = _parse_prob_tuple_arg(
+                args.direct_room_image_order_probs,
+                expected_len=len(direct_orders),
+                arg_name="--direct-room-image-order-probs",
+            )
+        cfg.direct_room_image_order_choices = direct_orders
+        cfg.direct_room_image_order_probs = direct_probs
+    elif args.direct_room_image_order_probs is not None:
+        raise ValueError("--direct-room-image-order-probs requires --direct-room-image-orders")
+
+    if args.reflection_room_image_orders is not None:
+        refl_orders = _parse_int_tuple_arg(args.reflection_room_image_orders, "--reflection-room-image-orders")
+        if args.reflection_room_image_order_probs is None:
+            refl_probs = tuple([1.0 / len(refl_orders)] * len(refl_orders))
+        else:
+            refl_probs = _parse_prob_tuple_arg(
+                args.reflection_room_image_order_probs,
+                expected_len=len(refl_orders),
+                arg_name="--reflection-room-image-order-probs",
+            )
+        cfg.reflection_room_image_order_choices = refl_orders
+        cfg.reflection_room_image_order_probs = refl_probs
+    elif args.reflection_room_image_order_probs is not None:
+        raise ValueError("--reflection-room-image-order-probs requires --reflection-room-image-orders")
+
+    if args.layout_modes is not None:
+        layout_modes = _parse_layout_modes_arg(args.layout_modes, "--layout-modes")
+        if args.layout_mode_probs is None:
+            layout_probs = tuple([1.0 / len(layout_modes)] * len(layout_modes))
+        else:
+            layout_probs = _parse_prob_tuple_arg(
+                args.layout_mode_probs,
+                expected_len=len(layout_modes),
+                arg_name="--layout-mode-probs",
+            )
+        cfg.layout_mode_choices = layout_modes
+        cfg.layout_mode_probs = layout_probs
+    elif args.layout_mode_probs is not None:
+        cfg.layout_mode_probs = _parse_prob_tuple_arg(
+            args.layout_mode_probs,
+            expected_len=len(cfg.layout_mode_choices),
+            arg_name="--layout-mode-probs",
+        )
+
+    if args.wall_margin is not None:
+        wall_margin = float(args.wall_margin)
+        if wall_margin <= 0.0:
+            raise ValueError(f"--wall-margin must be positive, got {wall_margin}")
+        cfg.wall_margin = wall_margin
+    if args.source_wall_margin is not None:
+        src_margin = float(args.source_wall_margin)
+        if src_margin <= 0.0:
+            raise ValueError(f"--source-wall-margin must be positive, got {src_margin}")
+        cfg.source_wall_margin = src_margin
+    if args.min_source_device_distance is not None:
+        src_dev = float(args.min_source_device_distance)
+        if src_dev <= 0.0:
+            raise ValueError(f"--min-source-device-distance must be positive, got {src_dev}")
+        cfg.min_source_device_distance = src_dev
+    if args.min_primary_advance_margin_m is not None:
+        p_margin = float(args.min_primary_advance_margin_m)
+        if p_margin < 0.0:
+            raise ValueError(f"--min-primary-advance-margin-m must be non-negative, got {p_margin}")
+        cfg.min_primary_advance_margin_m = p_margin
+    if args.min_secondary_feedback_margin_m is not None:
+        s_margin = float(args.min_secondary_feedback_margin_m)
+        if s_margin < 0.0:
+            raise ValueError(f"--min-secondary-feedback-margin-m must be non-negative, got {s_margin}")
+        cfg.min_secondary_feedback_margin_m = s_margin
+
+    return cfg
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2108,6 +2438,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"fs: {cfg.fs} Hz")
     print(f"duration: {cfg.noise_duration_s:.2f} s")
     print(f"filter_len: {cfg.filter_len}")
+    print(f"domain profile: {args.domain_profile}")
+    print(f"room size range: [{cfg.room_size_min:.2f}, {cfg.room_size_max:.2f}] m")
+    print(f"sound speed range: [{cfg.sound_speed_min:.1f}, {cfg.sound_speed_max:.1f}] m/s")
+    print(f"direct-room absorption range: {cfg.direct_room_absorption_range}")
+    print(f"reflection-room absorption range: {cfg.reflection_room_absorption_range}")
+    print(
+        "image-order distributions: "
+        f"direct={cfg.direct_room_image_order_choices}/{cfg.direct_room_image_order_probs}, "
+        f"reflection={cfg.reflection_room_image_order_choices}/{cfg.reflection_room_image_order_probs}"
+    )
+    print(f"layout modes/probs: {cfg.layout_mode_choices}/{cfg.layout_mode_probs}")
     print(f"mu_candidates: {cfg.mu_candidates}")
     print(f"ANC thresholds: min_nr_last_db={cfg.min_nr_last_db:.2f}, min_nr_gain_db={cfg.min_nr_gain_db:.2f}")
     print(

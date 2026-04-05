@@ -10,7 +10,7 @@ from typing import Any
 import h5py
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "python_impl") not in sys.path:
@@ -54,6 +54,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-split", choices=("test", "val", "train", "all"), default="test")
     parser.add_argument("--disable-improvement-gate", action="store_true")
     parser.add_argument("--disable-half-target-gate", action="store_true")
+    parser.add_argument(
+        "--acoustic-zero-channel-regex",
+        type=str,
+        default="",
+        help="Regex over logical acoustic channel names (e.g., ^E2R_|^R2R_) to zero matched channel pairs at load time.",
+    )
+    parser.add_argument(
+        "--disable-canonical-prior-eval",
+        action="store_true",
+        help="Ignore canonical prior at evaluation time (use residual head output only).",
+    )
+    parser.add_argument(
+        "--sample-idx-remap",
+        choices=("identity", "reverse", "shuffle", "offset"),
+        default="identity",
+        help="Remap sample_idx before model forward to test index/prior sensitivity.",
+    )
+    parser.add_argument("--sample-idx-seed", type=int, default=20260405)
+    parser.add_argument("--sample-idx-offset", type=int, default=1)
+    parser.add_argument("--ablation-tag", type=str, default="")
     return parser.parse_args()
 
 
@@ -65,6 +85,53 @@ class ReplayCase:
     reference_signal: np.ndarray
     desired_signal: np.ndarray
     mu_used: float
+
+
+class SampleIdxRemapDataset(Dataset):
+    def __init__(self, base_dataset: HybridAncDataset, remap: np.ndarray | None):
+        self.base_dataset = base_dataset
+        self.remap = None if remap is None else np.asarray(remap, dtype=np.int64).reshape(-1)
+
+    def __len__(self) -> int:
+        return len(self.base_dataset)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, ...]:
+        item = self.base_dataset[idx]
+        if self.remap is None:
+            return item
+
+        sample_idx_t = item[-1]
+        ridx = int(sample_idx_t.item())
+        if ridx < 0 or ridx >= int(self.remap.shape[0]):
+            mapped = ridx
+        else:
+            mapped = int(self.remap[ridx])
+        mapped_t = torch.tensor(mapped, dtype=torch.int64)
+        return item[:-1] + (mapped_t,)
+
+
+def build_sample_idx_remap(mode: str, num_samples: int, seed: int, offset: int) -> np.ndarray | None:
+    n = int(num_samples)
+    if n <= 0:
+        return None
+
+    m = str(mode).strip().lower()
+    base = np.arange(n, dtype=np.int64)
+    if m in ("", "identity"):
+        return None
+    if m == "reverse":
+        return base[::-1].copy()
+    if m == "shuffle":
+        rng = np.random.default_rng(int(seed))
+        out = base.copy()
+        rng.shuffle(out)
+        return out
+    if m == "offset":
+        shift = int(offset)
+        if n > 0:
+            shift = shift % n
+        return np.roll(base, shift=shift)
+    raise ValueError(f"Unsupported sample-idx-remap mode: {mode}")
 
 
 def build_replay_cases(h5_path: Path, room_indices: list[int]) -> list[ReplayCase]:
@@ -131,8 +198,10 @@ def predict_w_batch(
     indices: np.ndarray,
     batch_size: int,
     device: torch.device,
+    sample_idx_remap: np.ndarray | None = None,
 ) -> np.ndarray:
-    ds = HybridAncDataset(bundle=bundle, indices=np.asarray(indices, dtype=np.int64))
+    base_ds = HybridAncDataset(bundle=bundle, indices=np.asarray(indices, dtype=np.int64))
+    ds: Dataset = SampleIdxRemapDataset(base_dataset=base_ds, remap=sample_idx_remap)
     loader = DataLoader(ds, batch_size=int(batch_size), shuffle=False)
     pred_list: list[np.ndarray] = []
     model.eval()
@@ -319,13 +388,22 @@ def main() -> int:
         h5_path=h5_path,
         encoding=str(train_args["feature_encoding"]),
         disable_feature_b=bool(train_args["disable_feature_b"]),
+        acoustic_zero_channel_regex=str(args.acoustic_zero_channel_regex),
     )
 
-    use_canonical_prior = bool(train_args.get("use_canonical_prior", False))
+    use_canonical_prior_train = bool(train_args.get("use_canonical_prior", False))
+    use_canonical_prior = bool(use_canonical_prior_train and (not bool(args.disable_canonical_prior_eval)))
     if use_canonical_prior and bundle.w_canon is None:
         raise RuntimeError(
             "Checkpoint requires canonical prior, but processed/w_canon is missing in evaluation dataset."
         )
+
+    sample_idx_remap = build_sample_idx_remap(
+        mode=str(args.sample_idx_remap),
+        num_samples=int(bundle.gcc.shape[0]),
+        seed=int(args.sample_idx_seed),
+        offset=int(args.sample_idx_offset),
+    )
 
     device = torch.device(
         "cuda" if (str(args.device) == "auto" and torch.cuda.is_available()) else ("cpu" if str(args.device) == "auto" else str(args.device))
@@ -350,7 +428,10 @@ def main() -> int:
         canonical_prior_scale=float(train_args.get("canonical_prior_scale", 1.0)),
         residual_head_zero_init=bool(train_args.get("residual_head_zero_init", False)),
     ).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    strict_load = not bool(args.disable_canonical_prior_eval)
+    load_res = model.load_state_dict(checkpoint["model_state_dict"], strict=strict_load)
+    state_missing_keys = list(getattr(load_res, "missing_keys", []))
+    state_unexpected_keys = list(getattr(load_res, "unexpected_keys", []))
     loss_module = HybridAcousticLoss(
         lambda_reg=float(train_args.get("lambda_reg", 1.0e-3)),
         conv_domain=str(train_args.get("loss_domain", "freq")),
@@ -409,6 +490,7 @@ def main() -> int:
             continue
 
         ds = HybridAncDataset(bundle=bundle, indices=idx)
+        ds = SampleIdxRemapDataset(base_dataset=ds, remap=sample_idx_remap)
         loader = DataLoader(ds, batch_size=int(args.batch_size), shuffle=False)
         metrics = run_epoch(
             loader=loader,
@@ -458,6 +540,7 @@ def main() -> int:
             indices=probe,
             batch_size=min(int(args.batch_size), int(probe.size)),
             device=device,
+            sample_idx_remap=sample_idx_remap,
         )
         target_vals: np.ndarray | None
         try:
@@ -542,13 +625,27 @@ def main() -> int:
         "checkpoint": str(ckpt_path),
         "h5_path": str(h5_path),
         "seed": int(train_args.get("seed", -1)),
-        "ablation_tag": str(train_args.get("ablation_tag", "")),
+        "ablation_tag": str(args.ablation_tag) if str(args.ablation_tag).strip() else str(train_args.get("ablation_tag", "")),
+        "train_ablation_tag": str(train_args.get("ablation_tag", "")),
+        "eval_ablation": {
+            "acoustic_zero_channel_regex": str(args.acoustic_zero_channel_regex),
+            "disable_canonical_prior_eval": bool(args.disable_canonical_prior_eval),
+            "sample_idx_remap": str(args.sample_idx_remap),
+            "sample_idx_seed": int(args.sample_idx_seed),
+            "sample_idx_offset": int(args.sample_idx_offset),
+            "sample_idx_remap_active": bool(sample_idx_remap is not None),
+            "state_dict_strict_load": bool(strict_load),
+            "state_dict_missing_keys": state_missing_keys,
+            "state_dict_unexpected_keys": state_unexpected_keys,
+        },
         "feature_encoding": str(train_args.get("feature_encoding", "ri")),
         "fusion_mode": str(train_args.get("fusion_mode", "cross")),
         "disable_feature_b": bool(train_args.get("disable_feature_b", False)),
+        "acoustic_zero_channel_regex": str(args.acoustic_zero_channel_regex),
         "use_path_features": bool(train_args.get("use_path_features", False)),
         "use_index_embedding": bool(train_args.get("use_index_embedding", False)),
         "index_direct_lookup": bool(train_args.get("index_direct_lookup", False)),
+        "use_canonical_prior_train": use_canonical_prior_train,
         "use_canonical_prior": use_canonical_prior,
         "canonical_prior_scale": float(train_args.get("canonical_prior_scale", 1.0)),
         "canonical_residual_l2_weight": float(train_args.get("canonical_residual_l2_weight", 0.0)),
